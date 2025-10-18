@@ -16,7 +16,7 @@ on:
 
 env:
   # 您的 Docker 仓库和镜像名称
-  IMAGE_NAME: your-docker-user/sehuatang-crawler
+  IMAGE_NAME: xhy1640/sehuatang-crawler
 
 jobs:
   build-and-push:
