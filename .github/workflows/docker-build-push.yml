@@ -4,7 +4,7 @@ on:
   # 在推送到 main 分支时触发
   push:
     branches:
-      - main
+      - v2
     # 仅当 Dockerfile 或相关代码发生变化时触发
     paths:
       - 'Dockerfile'
@@ -44,7 +44,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE_NAME }}
-          # 清理标签定义，移除内部注释以避免解析问题
+          # 定义标签：使用 commit SHA short 格式和 main 分支的 latest
           tags: |
             type=sha,format=short
             type=raw,value=latest,enable={{is_default_branch}}
