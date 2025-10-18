@@ -69,6 +69,4 @@ jobs:
           # 缓存设置
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          
-      - name: ✅ Show pushed tags
-        run: echo "Successfully pushed Multi-Arch image with tags: ${{ steps.meta.outputs.tags }}"
+
