@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   sehuatang-crawler:
-    image: cxsz16888/sehuatang:latest
+    image: xhy1640/sehuatang-crawler:latest
     container_name: sehuatang-crawler
     restart: unless-stopped
 
