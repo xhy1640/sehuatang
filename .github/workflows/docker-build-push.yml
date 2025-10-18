@@ -4,7 +4,7 @@ on:
   # 在推送到 main 分支时触发
   push:
     branches:
-      - main
+      - v2
     # 仅当 Dockerfile 或相关代码发生变化时触发
     paths:
       - 'Dockerfile'
