@@ -1,24 +1,22 @@
-name: Build and Push ARM64 Docker Image
+name: Build and Push Multi-Architecture Image
 
 on:
   # 在推送到 main 分支时触发
   push:
     branches:
-      - v2
+      - main
     # 仅当 Dockerfile 或相关代码发生变化时触发
     paths:
       - 'Dockerfile'
       - 'requirements.txt'
       - '**.py'
-      - '.github/workflows/build-arm64.yml'
+      - '.github/workflows/docker-build-push.yml' # 确保此名称与实际文件名一致
   # 允许手动触发
   workflow_dispatch:
 
 env:
   # 您的 Docker 仓库和镜像名称
   IMAGE_NAME: your-docker-user/sehuatang-crawler
-  # 目标架构标签
-  PLATFORM_TAG: arm64
 
 jobs:
   build-and-push:
@@ -46,18 +44,19 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE_NAME }}
+          # 清理标签定义，移除内部注释以避免解析问题
           tags: |
-            type=sha,prefix=${{ env.PLATFORM_TAG }}-,suffix=,format=short
-            type=raw,value=${{ env.PLATFORM_TAG }}-latest,enable={{is_default_branch}}
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: 🚀 Build and push ARM64 image
+      - name: 🚀 Build and push Multi-Arch image
         uses: docker/build-push-action@v5
         with:
           # 指定 Dockerfile 路径
           context: .
           file: ./Dockerfile
-          # 指定目标平台为 linux/arm64/v8
-          platforms: linux/arm64/v8
+          # 同时构建 amd64 和 arm64/v8 并创建 Manifest List
+          platforms: linux/amd64,linux/arm64/v8 
           # 启用推送
           push: true
           # 使用 metadata action 生成的标签
@@ -72,4 +71,4 @@ jobs:
           cache-to: type=gha,mode=max
           
       - name: ✅ Show pushed tags
-        run: echo "Successfully pushed ARM64 image with tags: ${{ steps.meta.outputs.tags }}"
+        run: echo "Successfully pushed Multi-Arch image with tags: ${{ steps.meta.outputs.tags }}"
