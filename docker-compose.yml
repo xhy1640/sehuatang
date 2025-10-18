@@ -57,7 +57,7 @@ services:
 
   # Telegram Bot (可选，使用 --profile bot 启动)
   telegram-bot:
-    image: cxsz16888/sehuatang:latest
+    image: xhy1640/sehuatang-crawler:latest
     container_name: sehuatang-bot
     restart: unless-stopped
     profiles: ["bot"]
