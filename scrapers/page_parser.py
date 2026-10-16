@@ -2,10 +2,19 @@
 页面解析器模块
 负责解析HTML页面，提取所需数据
 """
+import html
 import re
+from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
 import bs4
 from util.log_util import log
+from scrapers.core.cf_challenge import is_cf_challenge, is_rate_limited
+
+
+@dataclass(frozen=True)
+class PlatePagination:
+    current_page: Optional[int] = None
+    last_page: Optional[int] = None
 
 
 class PageParser:
@@ -13,8 +22,17 @@ class PageParser:
     
     def __init__(self):
         self.log = log
+
+        self._magnet_re = re.compile(
+            r"magnet:\?xt=urn:btih:[A-Za-z0-9]{32,40}(?:[A-Za-z0-9&=%._+:/-]*)",
+            re.IGNORECASE,
+        )
+        self._link_115_re = re.compile(
+            r"(115://[A-Za-z0-9+/=]+|https?://(?:115\.com|115cdn\.com)/[^\s\"'<>]+)",
+            re.IGNORECASE,
+        )
     
-    def parse_plate_page(self, html_content: str, date_time: str) -> tuple[List[Dict[str, Any]], List[str]]:
+    def parse_plate_page(self, html_content: str, date_time: str, strict: bool = False) -> tuple[List[Dict[str, Any]], List[str]]:
         """
         解析板块页面，提取帖子信息
         
@@ -25,32 +43,125 @@ class PageParser:
         Returns:
             tuple: (帖子信息列表, 帖子ID列表)
         """
+        all_info = self.parse_plate_page_all(html_content, strict=strict)
+        info_list = [
+            item for item in all_info
+            if str(item.get("date", "")).startswith(date_time)
+        ]
+        tid_list = [item["tid"] for item in info_list]
+        return info_list, tid_list
+
+    def parse_plate_page_all(self, html_content: str, strict: bool = False) -> List[Dict[str, Any]]:
+        """解析列表页中的全部普通主题，不做日期过滤。"""
         info_list = []
-        tid_list = []
-        
         try:
             soup = bs4.BeautifulSoup(html_content, "html.parser")
             all_threads = soup.find_all(id=re.compile("^normalthread_"))
-            
+            if strict and not all_threads and not soup.find(id="threadlist") and not soup.find(id="threadlisttableid"):
+                raise ValueError("响应缺少板块列表结构")
             for thread in all_threads:
-                data = self._extract_thread_info(thread, date_time)
+                data = self._extract_thread_info(thread)
                 if data:
                     info_list.append(data)
-                    tid_list.append(data["tid"])
-                    
+            if strict and all_threads and not info_list:
+                raise ValueError("板块主题存在但无法解析")
         except Exception as e:
             self.log.error(f"解析板块页面时出错: {e}")
-            
-        return info_list, tid_list
+            if strict:
+                raise
+        return info_list
+
+    def parse_backfill_page(self, html_content: str) -> tuple[List[Dict[str, Any]], PlatePagination]:
+        """分页补抓校验完整列表，异常页不能被当作合法空页结束历史扫描。"""
+        raw = html_content.encode("utf-8") if isinstance(html_content, str) else html_content
+        if is_cf_challenge(raw, 200) or is_rate_limited(raw):
+            raise ValueError("响应为验证或访问受限页面")
+        soup = bs4.BeautifulSoup(html_content, "html.parser")
+        threads = soup.find_all(id=re.compile("^normalthread_"))
+        if not threads and soup.select_one("#messagetext, form#loginform"):
+            raise ValueError("响应为站点提示或登录页面")
+        records = self.parse_plate_page_all(html_content, strict=True)
+        if len(records) != len(threads):
+            raise ValueError("板块主题存在但字段解析不完整")
+        return records, self.parse_plate_pagination(html_content)
+
+    def parse_plate_pagination(self, html_content: str) -> PlatePagination:
+        """分页补抓只信任明确末页证据；邻近数字链接仅用于判断当前页是否已到末页。"""
+        soup = bs4.BeautifulSoup(html_content, "html.parser")
+        current_pages = set()
+        last_pages = set()
+        inferred_last_pages = set()
+        for pager in soup.select("div.pg"):
+            current = pager.select_one("strong")
+            current_number = None
+            if current and current.get_text(strip=True).isdigit():
+                current_number = int(current.get_text(strip=True))
+                current_pages.add(current_number)
+            linked_pages = []
+            has_next = bool(pager.select_one(".nxt, [rel~=next]"))
+            for anchor in pager.select("a[href]"):
+                match = re.search(r"(?:[?&]page=|forum-\d+-)(\d+)", anchor.get("href", ""))
+                number = int(match.group(1)) if match else None
+                if number:
+                    linked_pages.append(number)
+                label = anchor.get_text(" ", strip=True)
+                if re.search(r"下一[页頁]|next", label, re.I):
+                    has_next = True
+                if number and ("last" in anchor.get("class", [])
+                               or re.fullmatch(r"末[页頁]|尾[页頁]|最後一[页頁]|最后一页|last", label, re.I)):
+                    last_pages.add(number)
+            for hint in pager.select("[title], label span"):
+                text = f"{hint.get('title', '')} {hint.get_text(' ', strip=True)}"
+                match = re.search(r"(?:共\s*|/\s*)(\d+)\s*[页頁]", text)
+                if match:
+                    last_pages.add(int(match.group(1)))
+            # 没有下一页且所有可见页号均不大于当前页，才能确认已在最后一页。
+            if (current_number and not has_next and not pager.select_one("a.last")
+                    and all(n <= current_number for n in linked_pages)):
+                inferred_last_pages.add(current_number)
+        if not last_pages:
+            last_pages = inferred_last_pages
+        if len(current_pages) > 1 or len(last_pages) > 1:
+            raise ValueError("分页栏页码或总页数不一致")
+        current = next(iter(current_pages), None)
+        last = next(iter(last_pages), None)
+        if (current is not None and current < 1) or (last is not None and last < 1):
+            raise ValueError("分页栏页码无效")
+        if current and last and current > last:
+            raise ValueError("分页栏当前页超过末页")
+        return PlatePagination(current, last)
+
+    def parse_last_page(self, html_content: str) -> int:
+        """从 Discuz 分页栏提取最后一页页码。"""
+        try:
+            soup = bs4.BeautifulSoup(html_content, "html.parser")
+            page_numbers = []
+            current_page = soup.select_one("div.pg strong")
+            if current_page and current_page.get_text(strip=True).isdigit():
+                page_numbers.append(int(current_page.get_text(strip=True)))
+
+            for anchor in soup.select("div.pg a[href]"):
+                href = anchor.get("href", "")
+                matches = re.findall(
+                    r"(?:[?&]page=|forum-\d+-)(\d+)",
+                    href,
+                )
+                page_numbers.extend(int(value) for value in matches)
+
+                text_numbers = re.findall(r"\d+", anchor.get_text(" ", strip=True))
+                page_numbers.extend(int(value) for value in text_numbers)
+
+            return max(page_numbers, default=1)
+        except Exception as e:
+            self.log.error(f"解析板块最后页码时出错: {e}")
+            return 1
     
-    def _extract_thread_info(self, thread_element, date_time: str) -> Optional[Dict[str, Any]]:
+    def _extract_thread_info(self, thread_element) -> Optional[Dict[str, Any]]:
         """
         从线程元素中提取信息
         
         Args:
             thread_element: BeautifulSoup元素
-            date_time: 目标日期
-            
         Returns:
             帖子信息字典或None
         """
@@ -66,17 +177,16 @@ class PageParser:
             title = " ".join(title_list)
             
             # 提取日期
-            date_td_em = thread_element.find("td", class_="by").find("em")
-            date_span = date_td_em.find("span", attrs={"title": re.compile("^" + date_time)})
-            
+            date_td = thread_element.find("td", class_="by")
+            date_td_em = date_td.find("em") if date_td else None
+            if not date_td_em:
+                return None
+
+            date_span = date_td_em.find("span", attrs={"title": True})
             if date_span is not None:
-                date = date_span.attrs["title"]
+                date = date_span.get("title")
             else:
-                flag = date_td_em.get_text().startswith(date_time)
-                if flag:
-                    date = date_td_em.get_text()
-                else:
-                    return None
+                date = date_td_em.get_text(" ", strip=True)
                     
             if date is None:
                 return None
@@ -118,8 +228,8 @@ class PageParser:
                 return None
             title = title_element.find("span").get_text()
             
-            # 获取帖子内容
-            info_element = soup.find("td", class_="t_f")
+            # 获取首帖内容，避免回帖/引用干扰
+            info_element = self._get_primary_post_element(soup)
             if not info_element:
                 return None
                 
@@ -130,8 +240,8 @@ class PageParser:
                     img_list.append(img.attrs["file"])
             
             # 提取磁力链接
-            magnet = self._extract_magnet_link(soup)
-            magnet_115 = self._extract_115_link(soup)
+            magnet = self._extract_magnet_link(info_element)
+            magnet_115 = self._extract_115_link(info_element)
             
             # 提取发布时间
             post_time = self._extract_post_time(soup)
@@ -148,24 +258,45 @@ class PageParser:
             self.log.error(f"解析帖子页面时出错: {e}")
             return None
     
-    def _extract_magnet_link(self, soup) -> Optional[str]:
+    def _get_primary_post_element(self, soup):
+        """获取首帖正文元素"""
+        try:
+            post_list = soup.find("div", id="postlist")
+            if post_list:
+                info_element = post_list.find("td", class_="t_f")
+                if info_element:
+                    return info_element
+            return soup.find("td", class_="t_f")
+        except Exception as e:
+            self.log.error(f"获取首帖内容时出错: {e}")
+            return None
+
+    def _extract_magnet_link(self, content_root) -> Optional[str]:
         """提取磁力链接"""
         try:
-            blockcode = soup.find("div", class_="blockcode")
-            if blockcode and blockcode.find("li"):
-                return blockcode.find("li").get_text()
+            link_candidates = self._extract_magnets_from_links(content_root)
+            code_candidates = self._extract_magnets_from_blockcode(content_root)
+            text_candidates = self._extract_magnets_from_text(
+                content_root.get_text(" ", strip=True)
+            )
+            return self._pick_first_candidate(
+                [link_candidates, code_candidates, text_candidates]
+            )
         except Exception as e:
             self.log.error(f"提取磁力链接时出错: {e}")
         return None
     
-    def _extract_115_link(self, soup) -> Optional[str]:
+    def _extract_115_link(self, content_root) -> Optional[str]:
         """提取115链接"""
         try:
-            blockcode = soup.find("div", class_="blockcode")
-            if blockcode:
-                next_blockcode = blockcode.find_next("div", class_="blockcode")
-                if next_blockcode and next_blockcode.find("li"):
-                    return next_blockcode.find("li").get_text()
+            link_candidates = self._extract_115_from_links(content_root)
+            code_candidates = self._extract_115_from_blockcode(content_root)
+            text_candidates = self._extract_115_from_text(
+                content_root.get_text(" ", strip=True)
+            )
+            return self._pick_first_candidate(
+                [link_candidates, code_candidates, text_candidates]
+            )
         except Exception as e:
             self.log.error(f"提取115链接时出错: {e}")
         return None
@@ -184,3 +315,76 @@ class PageParser:
         except Exception as e:
             self.log.error(f"提取发布时间时出错: {e}")
             return None
+
+    def _clean_candidate_text(self, text: str) -> str:
+        """清理候选文本，去掉转义和HTML标签"""
+        if not text:
+            return ""
+        cleaned = html.unescape(text).strip()
+        if "<" in cleaned and ">" in cleaned:
+            try:
+                cleaned = bs4.BeautifulSoup(cleaned, "html.parser").get_text(
+                    " ", strip=True
+                )
+            except Exception:
+                pass
+        return cleaned.strip()
+
+    def _strip_trailing_punct(self, text: str) -> str:
+        return text.rstrip(").,，。;；:!?]}>\"'")
+
+    def _extract_magnets_from_links(self, content_root) -> List[str]:
+        magnets = []
+        for anchor in content_root.find_all("a", href=True):
+            href = anchor["href"].strip()
+            if href.lower().startswith("magnet:?"):
+                magnets.extend(self._extract_magnets_from_text(href))
+        return magnets
+
+    def _extract_magnets_from_blockcode(self, content_root) -> List[str]:
+        magnets = []
+        for node in content_root.select("div.blockcode li, div.blockcode code"):
+            magnets.extend(
+                self._extract_magnets_from_text(node.get_text(" ", strip=True))
+            )
+        return magnets
+
+    def _extract_magnets_from_text(self, text: str) -> List[str]:
+        cleaned = self._clean_candidate_text(text)
+        if not cleaned:
+            return []
+        matches = self._magnet_re.findall(cleaned)
+        return [self._strip_trailing_punct(m) for m in matches]
+
+    def _extract_115_from_links(self, content_root) -> List[str]:
+        links = []
+        for anchor in content_root.find_all("a", href=True):
+            href = anchor["href"].strip()
+            if href.lower().startswith("115://") or "115.com" in href:
+                links.extend(self._extract_115_from_text(href))
+        return links
+
+    def _extract_115_from_blockcode(self, content_root) -> List[str]:
+        links = []
+        for node in content_root.select("div.blockcode li, div.blockcode code"):
+            links.extend(
+                self._extract_115_from_text(node.get_text(" ", strip=True))
+            )
+        return links
+
+    def _extract_115_from_text(self, text: str) -> List[str]:
+        cleaned = self._clean_candidate_text(text)
+        if not cleaned:
+            return []
+        matches = self._link_115_re.findall(cleaned)
+        return [self._strip_trailing_punct(m) for m in matches]
+
+    def _pick_first_candidate(self, candidate_groups: List[List[str]]) -> Optional[str]:
+        seen = set()
+        for group in candidate_groups:
+            for item in group:
+                if not item or item in seen:
+                    continue
+                seen.add(item)
+                return item
+        return None

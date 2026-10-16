@@ -1,0 +1,1829 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>爬虫管理 · 采集工作台</title>
+    <style>
+      :root {
+        --bg: #f3f3ed;
+        --paper: #fff;
+        --ink: #202c2a;
+        --muted: #737d78;
+        --line: #e1e5df;
+        --teal: #007a67;
+        --teal-bg: #e5f5ee;
+        --amber: #a35d00;
+        --amber-bg: #fff1cf;
+        --red: #b43f35;
+        --red-bg: #fcece8;
+        --mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font:
+          14px/1.6 "Bahnschrift",
+          "Microsoft YaHei UI",
+          sans-serif;
+      }
+      button,
+      input,
+      select,
+      textarea {
+        font: inherit;
+      }
+      button {
+        cursor: pointer;
+      }
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.45;
+      }
+      button,
+      input,
+      select {
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--paper);
+        color: var(--ink);
+        padding: 8px 12px;
+        min-height: 38px;
+      }
+      button:hover:not(:disabled) {
+        border-color: var(--teal);
+        color: var(--teal);
+      }
+      :focus-visible {
+        outline: 3px solid #45ad94;
+        outline-offset: 3px;
+      }
+      .primary {
+        background: var(--teal);
+        border-color: var(--teal);
+        color: white;
+      }
+      .primary:hover:not(:disabled) {
+        background: #006350;
+        color: white;
+      }
+      .danger {
+        color: var(--red);
+      }
+      [hidden] {
+        display: none !important;
+      }
+      header {
+        height: 72px;
+        padding: 0 36px;
+        border-bottom: 1px solid var(--line);
+        background: #fafbf7;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+      }
+      .brand {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+      }
+      .brand-mark {
+        display: grid;
+        place-items: center;
+        width: 34px;
+        height: 34px;
+        background: var(--ink);
+        color: #b7edcc;
+        font: 18px var(--mono);
+        border-radius: 5px;
+      }
+      .brand strong {
+        font-size: 16px;
+        letter-spacing: 1px;
+      }
+      .header-tools {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .storage {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .clock {
+        font: 12px var(--mono);
+        color: var(--muted);
+      }
+      main {
+        max-width: 1480px;
+        margin: auto;
+        padding: 32px 36px 50px;
+      }
+      .page-title {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-end;
+        margin-bottom: 22px;
+      }
+      .eyebrow {
+        font: 11px var(--mono);
+        letter-spacing: 2px;
+        color: var(--muted);
+        margin: 0 0 8px;
+      }
+      h1 {
+        font-size: 29px;
+        letter-spacing: 1px;
+        margin: 0;
+        font-weight: 600;
+      }
+      h2,
+      h3,
+      p {
+        margin-top: 0;
+      }
+      .subtitle {
+        margin: 5px 0 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .sync {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .error-banner {
+        padding: 12px 16px;
+        background: var(--red-bg);
+        color: var(--red);
+        border: 1px solid #ecc2ba;
+        border-radius: 7px;
+        margin-bottom: 18px;
+      }
+      .overview {
+        display: grid;
+        grid-template-columns: minmax(0, 1.5fr) minmax(300px, 1fr);
+        gap: 16px;
+        margin-bottom: 24px;
+      }
+      .live-panel {
+        background: var(--ink);
+        color: #f5f8f0;
+        border-radius: 10px;
+        padding: 23px 26px;
+        min-height: 144px;
+        position: relative;
+        overflow: hidden;
+      }
+      .live-panel:after {
+        content: "";
+        position: absolute;
+        right: 0;
+        top: 0;
+        bottom: 0;
+        width: 160px;
+        background: repeating-linear-gradient(
+          90deg,
+          transparent,
+          transparent 15px,
+          #ffffff05 16px
+        );
+        pointer-events: none;
+      }
+      .panel-kicker {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        margin-bottom: 12px;
+      }
+      .dot {
+        display: inline-block;
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #95a09b;
+      }
+      .active-dot {
+        background: #80e4b6;
+        box-shadow: 0 0 0 4px #80e4b617;
+      }
+      .live-panel h2 {
+        font-size: 23px;
+        margin: 0 0 6px;
+        font-weight: 500;
+      }
+      .live-panel .sub {
+        color: #adbcb5;
+        font-size: 12px;
+      }
+      .active-task {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        position: relative;
+        z-index: 1;
+      }
+      .active-task + .active-task {
+        margin-top: 8px;
+      }
+      .active-task strong {
+        font-weight: 500;
+        font-size: 17px;
+      }
+      .elapsed {
+        font: 13px var(--mono);
+        color: #9aefc5;
+        white-space: nowrap;
+      }
+      .next-panel {
+        border: 1px solid #e9d7b1;
+        border-radius: 10px;
+        background: var(--amber-bg);
+        padding: 23px 26px;
+      }
+      .next-panel .panel-kicker {
+        color: #936827;
+      }
+      .next-line {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: baseline;
+      }
+      .next-time {
+        font: 30px var(--mono);
+        letter-spacing: -1px;
+      }
+      .countdown {
+        font: 12px var(--mono);
+        color: var(--amber);
+        white-space: nowrap;
+      }
+      .next-name {
+        font-size: 12px;
+        color: #90703c;
+        margin-top: 8px;
+      }
+      .section-title {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 12px;
+      }
+      .section-title h2 {
+        font-size: 14px;
+        font-weight: 600;
+        margin: 0;
+      }
+      .section-title span {
+        font: 11px var(--mono);
+        color: var(--muted);
+      }
+      .sources {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 16px;
+        margin-bottom: 30px;
+      }
+      .source-card {
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: var(--paper);
+        overflow: hidden;
+        min-width: 0;
+      }
+      .source-card.running {
+        border-color: var(--teal);
+        box-shadow: 0 0 0 1px var(--teal);
+      }
+      .source-top {
+        padding: 18px 20px 12px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .source-top h3 {
+        font: 600 17px var(--mono);
+        margin: 0;
+        flex: 1;
+      }
+      .source-index {
+        color: #adb5af;
+        font: 11px var(--mono);
+      }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        border-radius: 4px;
+        padding: 2px 7px;
+        white-space: nowrap;
+        font-size: 11px;
+        font-weight: 500;
+        background: #edf0ec;
+        color: var(--muted);
+      }
+      .badge.ok,
+      .badge.running {
+        background: var(--teal-bg);
+        color: var(--teal);
+      }
+      .badge.failed,
+      .badge.exhausted {
+        background: var(--red-bg);
+        color: var(--red);
+      }
+      .badge.partial_success,
+      .badge.due {
+        background: var(--amber-bg);
+        color: var(--amber);
+      }
+      .schedule {
+        padding: 0 20px 15px;
+      }
+      .schedule-label {
+        font-size: 11px;
+        color: var(--muted);
+        margin-bottom: 5px;
+      }
+      .schedule-value {
+        font: 25px var(--mono);
+        letter-spacing: -1px;
+      }
+      .schedule-meta {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+        color: var(--muted);
+        font-size: 11px;
+        margin-top: 3px;
+      }
+      .running .schedule-label,
+      .running .schedule-value {
+        color: var(--teal);
+      }
+      .running .schedule-value {
+        font-family: inherit;
+        font-weight: 500;
+        letter-spacing: 0;
+      }
+      .last-run {
+        padding: 12px 20px;
+        border-top: 1px solid var(--line);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .last-run small {
+        display: block;
+        font: 11px var(--mono);
+        margin-top: 4px;
+      }
+      .source-actions {
+        border-top: 1px solid var(--line);
+        padding: 12px 20px;
+        display: flex;
+        gap: 7px;
+      }
+      .source-actions button {
+        font-size: 12px;
+        padding: 6px 9px;
+        min-height: 34px;
+      }
+      .source-actions .primary {
+        flex: 1;
+      }
+      .workspace {
+        background: var(--paper);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        overflow: hidden;
+      }
+      .tabbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        border-bottom: 1px solid var(--line);
+        padding: 0 22px;
+        gap: 12px;
+      }
+      .tabs {
+        display: flex;
+        gap: 24px;
+        overflow: auto;
+        scrollbar-width: thin;
+      }
+      .tabs button {
+        border: 0;
+        border-bottom: 3px solid transparent;
+        border-radius: 0;
+        padding: 18px 0 14px;
+        white-space: nowrap;
+        color: var(--muted);
+        background: transparent;
+      }
+      .tabs button[aria-selected="true"] {
+        color: var(--ink);
+        border-bottom-color: var(--teal);
+        font-weight: 600;
+      }
+      .tab-count {
+        font: 10px var(--mono);
+        margin-left: 5px;
+        padding: 2px 5px;
+        border-radius: 3px;
+        background: var(--bg);
+        color: var(--muted);
+      }
+      .panel {
+        padding: 22px;
+      }
+      .toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        margin-bottom: 16px;
+      }
+      .toolbar h2 {
+        font-size: 16px;
+        margin: 0 0 3px;
+      }
+      .hint {
+        font-size: 12px;
+        color: var(--muted);
+        margin: 0;
+      }
+      .filters {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .filters select {
+        font-size: 12px;
+        min-width: 100px;
+      }
+      .table-wrap {
+        overflow: auto;
+        max-height: 420px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+      }
+      table {
+        width: 100%;
+        border-collapse: separate;
+        border-spacing: 0;
+        white-space: nowrap;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 12px 14px;
+        border-bottom: 1px solid #edf0eb;
+        font-size: 12px;
+      }
+      th {
+        color: var(--muted);
+        background: #f7f8f4;
+        font-size: 11px;
+        font-weight: 500;
+        position: sticky;
+        top: 0;
+        z-index: 1;
+      }
+      tr:last-child td {
+        border-bottom: 0;
+      }
+      tbody tr:hover {
+        background: #fafbf7;
+      }
+      .number {
+        font-family: var(--mono);
+        font-variant-numeric: tabular-nums;
+      }
+      .negative {
+        color: var(--red);
+      }
+      .positive {
+        color: var(--teal);
+      }
+      .error-detail {
+        display: block;
+        max-width: 360px;
+        white-space: normal;
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 3px;
+        overflow-wrap: anywhere;
+      }
+      .empty {
+        text-align: center;
+        color: var(--muted);
+        padding: 55px 15px;
+      }
+      .table-note {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        color: var(--muted);
+        font-size: 11px;
+        margin-top: 12px;
+      }
+      .stats-line {
+        display: flex;
+        gap: 16px;
+        flex-wrap: wrap;
+        font-size: 12px;
+        color: var(--muted);
+        margin-bottom: 14px;
+      }
+      .stats-line b {
+        font-family: var(--mono);
+        color: var(--ink);
+      }
+      .requeue {
+        min-height: 30px;
+        font-size: 11px;
+        padding: 4px 8px;
+      }
+      .backfill-layout {
+        display: grid;
+        grid-template-columns: minmax(270px, 1fr) minmax(0, 1.8fr);
+        gap: 24px;
+      }
+      .backfill-form {
+        background: #f7f8f4;
+        border: 1px solid var(--line);
+        padding: 20px;
+        border-radius: 7px;
+      }
+      .field {
+        display: block;
+        margin-bottom: 16px;
+        font-size: 12px;
+      }
+      .field input,
+      .field select {
+        display: block;
+        width: 100%;
+        margin-top: 6px;
+      }
+      .field-pair {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+      .check {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        margin: 10px 0;
+        font-size: 12px;
+      }
+      .check input {
+        min-height: auto;
+        accent-color: var(--teal);
+      }
+      .backfill-form button {
+        width: 100%;
+        margin-top: 12px;
+      }
+      .log-tools {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-bottom: 15px;
+      }
+      .log-tools label {
+        font-size: 12px;
+        display: flex;
+        gap: 7px;
+        align-items: center;
+      }
+      .log-tools input[type="number"] {
+        width: 90px;
+      }
+      #logBox {
+        margin: 0;
+        min-height: 260px;
+        max-height: 480px;
+        overflow: auto;
+        padding: 20px;
+        background: #202b29;
+        color: #d8e7db;
+        border-radius: 7px;
+        font: 12px/1.8 var(--mono);
+        white-space: pre;
+      }
+      #logBox.empty-log {
+        white-space: pre-wrap;
+      }
+      textarea {
+        width: 100%;
+        min-height: 410px;
+        padding: 18px;
+        resize: vertical;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        font: 12px/1.7 var(--mono);
+        background: #fafbf8;
+        color: var(--ink);
+      }
+      footer {
+        display: flex;
+        justify-content: space-between;
+        margin-top: 18px;
+        color: #909991;
+        font-size: 11px;
+      }
+      .toast {
+        position: fixed;
+        bottom: 25px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: var(--ink);
+        color: white;
+        padding: 12px 20px;
+        border-radius: 7px;
+        box-shadow: 0 5px 25px #0002;
+        z-index: 10;
+        max-width: 90vw;
+      }
+      .toast.error {
+        background: var(--red);
+      }
+      .network-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 16px; }
+      .network-card { border: 1px solid var(--line); border-radius: 12px; padding: 20px; min-width: 0; }
+      .network-top { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+      .network-top h3 { margin: 0; font-size: 15px; }
+      .network-address { margin: 12px 0; overflow-wrap: anywhere; font-size: 13px; }
+      .network-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 18px 0; }
+      .network-stats dt { font-size: 12px; color: var(--muted); }
+      .network-stats dd { margin: 4px 0 0; font-size: 20px; font-variant-numeric: tabular-nums; }
+      .network-detail { border-top: 1px solid var(--line); padding-top: 12px; overflow-wrap: anywhere; }
+      @media (min-width: 1500px) {
+        main {
+          padding-top: 42px;
+        }
+        .overview {
+          margin-bottom: 30px;
+        }
+      }
+      @media (max-width: 1050px) {
+        main {
+          padding: 24px;
+        }
+        .source-top,
+        .schedule,
+        .last-run,
+        .source-actions {
+          padding-left: 14px;
+          padding-right: 14px;
+        }
+        .source-actions {
+          flex-wrap: wrap;
+        }
+        .last-run {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+        .tabs {
+          gap: 18px;
+        }
+        .schedule-meta {
+          flex-wrap: wrap;
+        }
+      }
+      @media (max-width: 760px) {
+        header {
+          height: auto;
+          min-height: 66px;
+          padding: 15px 18px;
+        }
+        .storage,
+        .clock {
+          display: none;
+        }
+        .header-tools {
+          gap: 6px;
+        }
+        .header-tools button {
+          padding: 6px 8px;
+          font-size: 11px;
+        }
+        main {
+          padding: 22px 16px;
+        }
+        .page-title {
+          align-items: flex-start;
+        }
+        .page-title h1 {
+          font-size: 25px;
+        }
+        .sync {
+          max-width: 105px;
+          text-align: right;
+        }
+        .overview {
+          grid-template-columns: 1fr;
+          gap: 12px;
+        }
+        .live-panel,
+        .next-panel {
+          padding: 20px;
+        }
+        .sources {
+          grid-template-columns: 1fr;
+          gap: 12px;
+        }
+        .source-top {
+          padding-top: 16px;
+        }
+        .source-actions {
+          flex-wrap: nowrap;
+        }
+        .last-run {
+          flex-direction: row;
+        }
+        .schedule-meta {
+          justify-content: flex-start;
+          gap: 18px;
+        }
+        .source-card .schedule {
+          padding-bottom: 12px;
+        }
+        .tabbar {
+          padding: 0 15px;
+        }
+        .tabs {
+          gap: 22px;
+        }
+        .tabbar > button {
+          display: none;
+        }
+        .panel {
+          padding: 16px;
+        }
+        .toolbar {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+        .filters {
+          width: 100%;
+        }
+        .filters select {
+          flex: 1;
+          min-width: 0;
+        }
+        .filters #requeueExhausted {
+          flex-basis: 100%;
+        }
+        .backfill-layout {
+          grid-template-columns: 1fr;
+        }
+        .next-time {
+          font-size: 28px;
+        }
+        .active-task {
+          align-items: flex-start;
+        }
+        .active-task strong {
+          font-size: 14px;
+        }
+        .elapsed {
+          font-size: 11px;
+        }
+        .table-note {
+          flex-direction: column;
+          gap: 4px;
+        }
+        footer {
+          font-size: 10px;
+        }
+        .subtitle {
+          font-size: 12px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">≋</span
+        ><strong>爬虫管理</strong>
+      </div>
+      <div class="header-tools">
+        <span class="storage" id="storage">读取存储状态…</span
+        ><button id="tokenButton">访问设置</button
+        ><button class="danger" id="restartButton">重启服务</button>
+      </div>
+    </header>
+    <main>
+      <div class="page-title">
+        <div>
+          <p class="eyebrow">COLLECTION / WORKSPACE</p>
+          <h1>采集工作台</h1>
+          <p class="subtitle">掌握来源动态，让每一次采集都有迹可循。</p>
+        </div>
+        <div class="sync" id="sync" role="status">正在同步…</div>
+      </div>
+      <div id="errorBanner" class="error-banner" role="alert" hidden></div>
+      <div class="overview">
+        <div class="live-panel" id="livePanel">
+          <div class="panel-kicker"><i class="dot"></i>当前运行</div>
+          <h2>正在读取任务状态…</h2>
+        </div>
+        <div class="next-panel" id="nextPanel">
+          <div class="panel-kicker">下一次调度</div>
+          <div class="next-time">—</div>
+        </div>
+      </div>
+      <div class="section-title">
+        <h2>来源概览</h2>
+        <span id="sourceCount">SOURCES / —</span>
+      </div>
+      <div id="sources" class="sources"></div>
+      <div class="workspace">
+        <div class="tabbar">
+          <div class="tabs" role="tablist" aria-label="采集管理功能">
+            <button
+              id="tab-runs"
+              role="tab"
+              aria-selected="true"
+              aria-controls="panel-runs"
+              data-tab="runs"
+            >
+              运行记录
+            </button>
+            <button
+              id="tab-failures"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-failures"
+              tabindex="-1"
+              data-tab="failures"
+            >
+              失败台账 <span class="tab-count" id="failureCount">—</span>
+            </button>
+            <button
+              id="tab-notifications"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-notifications"
+              tabindex="-1"
+              data-tab="notifications"
+            >
+              通知队列
+            </button>
+            <button
+              id="tab-backfill"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-backfill"
+              tabindex="-1"
+              data-tab="backfill"
+            >
+              分页补抓
+            </button>
+            <button
+              id="tab-logs"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-logs"
+              tabindex="-1"
+              data-tab="logs"
+            >
+              日志
+            </button>
+            <button
+              id="tab-network"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-network"
+              tabindex="-1"
+              data-tab="network"
+            >
+              线路监测
+            </button>
+            <button
+              id="tab-config"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-config"
+              tabindex="-1"
+              data-tab="config"
+            >
+              配置
+            </button>
+          </div>
+          <button id="refreshButton" aria-label="刷新当前面板">↻ 刷新</button>
+        </div>
+        <section
+          class="panel"
+          id="panel-network"
+          role="tabpanel"
+          aria-labelledby="tab-network"
+          hidden
+        >
+          <div class="toolbar">
+            <div>
+              <h2>线路监测</h2>
+              <p class="hint">可直接检测代理与目标站；网络失败线路暂时隔离，恢复后继续调度。</p>
+            </div>
+            <select id="networkSource" aria-label="线路监测来源">
+              <option value="">全部来源</option>
+              <option value="sehuatang">sehuatang</option>
+              <option value="javbee">javbee</option>
+              <option value="x1080x">x1080x</option>
+            </select>
+            <button id="checkNetwork" class="primary">检测全部</button>
+          </div>
+          <p class="hint" id="networkNote" role="status" aria-live="polite">正在读取线路状态…</p>
+          <div id="networkLines" class="network-grid"></div>
+          <p class="hint">请求次数包含重试；最终失败按抓取结果统计，诊断请求不计入。数据仅属于当前进程，重启后重新采样。</p>
+        </section>
+        <section
+          class="panel"
+          id="panel-runs"
+          role="tabpanel"
+          aria-labelledby="tab-runs"
+        >
+          <div class="toolbar">
+            <div>
+              <h2>最近运行</h2>
+              <p class="hint">查看采集结果、失败数量与执行耗时</p>
+            </div>
+            <div class="filters">
+              <select id="runSource" aria-label="运行记录来源">
+                <option value="">全部来源</option>
+                <option>sehuatang</option>
+                <option>javbee</option>
+                <option>x1080x</option></select
+              ><select id="runLimit" aria-label="运行记录条数">
+                <option value="20">最近 20 条</option>
+                <option value="50">最近 50 条</option>
+                <option value="100">最近 100 条</option>
+              </select>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>执行时间</th>
+                  <th>来源</th>
+                  <th>结果</th>
+                  <th>发现</th>
+                  <th>请求</th>
+                  <th>保存</th>
+                  <th>失败</th>
+                  <th>耗时</th>
+                </tr>
+              </thead>
+              <tbody id="runsBody"></tbody>
+            </table>
+          </div>
+          <div class="table-note">
+            <span id="runsNote">加载中…</span
+            ><span>时间按浏览器本地时区显示</span>
+          </div>
+        </section>
+        <section
+          class="panel"
+          id="panel-failures"
+          role="tabpanel"
+          aria-labelledby="tab-failures"
+          hidden
+        >
+          <div class="toolbar">
+            <div>
+              <h2>失败台账</h2>
+              <p class="hint" id="failurePolicy">
+                达到上限或遇明确封锁、会员限制时停止重试，保留失败记录
+              </p>
+            </div>
+            <div class="filters">
+              <select id="failureSource" aria-label="失败来源">
+                <option value="">全部来源</option>
+                <option>sehuatang</option>
+                <option>javbee</option>
+                <option>x1080x</option></select
+              ><select id="failureState" aria-label="失败状态">
+                <option value="">全部状态</option>
+                <option value="due">到期待重试</option>
+                <option value="waiting">等待重试</option>
+                <option value="exhausted">已停止</option>
+              </select>
+              <button id="requeueExhausted" disabled title="先选择一个来源">
+                重新入队已停止
+              </button>
+            </div>
+          </div>
+          <div id="failureStats" class="stats-line"></div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>来源 / 目标</th>
+                  <th>阶段</th>
+                  <th>错误原因</th>
+                  <th>本轮失败 / 上限</th>
+                  <th>状态</th>
+                  <th>下次重试</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="failuresBody"></tbody>
+            </table>
+          </div>
+          <div class="table-note">
+            <span>最多显示最近 200 条；统计覆盖所选来源的全部台账</span
+            ><span>重新入队保留历史累计次数</span>
+          </div>
+        </section>
+        <section
+          class="panel"
+          id="panel-notifications"
+          role="tabpanel"
+          aria-labelledby="tab-notifications"
+          hidden
+        >
+          <div class="toolbar">
+            <div>
+              <h2>Telegram 通知队列</h2>
+              <p class="hint">
+                采集后自动入队，由发送线程顺序处理。仅保存在当前进程，重启后清空。
+              </p>
+            </div>
+            <span class="badge" id="notificationEnabled">读取中</span>
+          </div>
+          <div id="notificationStats" class="stats-line"></div>
+          <div id="notificationWarning" class="error-banner" hidden></div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>入队时间</th>
+                  <th>来源 / 目标</th>
+                  <th>通知内容</th>
+                  <th>状态</th>
+                  <th>尝试次数</th>
+                  <th>分组进度</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="notificationBody"></tbody>
+            </table>
+          </div>
+          <div class="table-note">
+            <span>显示发送中的任务、最多 100 条等待任务和最近 100 条结果</span>
+            <span>失败重试从未完成的分组继续；数字统计仅覆盖本次进程</span>
+          </div>
+        </section>
+        <section
+          class="panel"
+          id="panel-backfill"
+          role="tabpanel"
+          aria-labelledby="tab-backfill"
+          hidden
+        >
+          <div class="toolbar">
+            <div>
+              <h2>分页补抓</h2>
+              <p class="hint">按指定区间补齐历史数据，可从检查点继续</p>
+            </div>
+          </div>
+          <div class="backfill-layout">
+            <form id="backfillForm" class="backfill-form">
+              <label class="field"
+                >来源<select id="bfSource">
+                  <option>x1080x</option>
+                  <option>sehuatang</option>
+                </select></label
+              >
+              <div class="field-pair">
+                <label class="field"
+                  >起始页<input
+                    type="number"
+                    id="bfStart"
+                    value="1"
+                    min="1"
+                    required /></label
+                ><label class="field"
+                  >结束页<input
+                    type="number"
+                    id="bfEnd"
+                    min="1"
+                    required
+                    placeholder="例如 100"
+                /></label>
+              </div>
+              <label class="field"
+                >分区 ID<input
+                  id="bfPartition"
+                  type="text"
+                  placeholder="typeid / fid，逗号分隔，可留空" /></label
+              ><label class="check"
+                ><input type="checkbox" id="bfResume" />从检查点继续</label
+              ><label class="check"
+                ><input type="checkbox" id="bfDry" />只试运行，不保存数据</label
+              ><button class="primary" type="submit">开始补抓</button>
+            </form>
+            <div>
+              <h3 style="font-size: 13px">已保存的检查点</h3>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>来源 / 分区</th>
+                      <th>已完成页</th>
+                    </tr>
+                  </thead>
+                  <tbody id="progressBody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section
+          class="panel"
+          id="panel-logs"
+          role="tabpanel"
+          aria-labelledby="tab-logs"
+          hidden
+        >
+          <div class="toolbar">
+            <div>
+              <h2>运行日志</h2>
+              <p class="hint">在当前面板自动更新；阅读历史日志时保留滚动位置</p>
+            </div>
+          </div>
+          <div class="log-tools">
+            <label for="logFile">文件<select id="logFile">
+              <option value="crawler">crawler.log</option>
+              <option value="error">error.log</option></select></label>
+            <label for="logLevel">级别<select id="logLevel">
+              <option value="">全部级别</option>
+              <option value="DEBUG">DEBUG · 调试</option>
+              <option value="INFO">INFO · 普通</option>
+              <option value="WARNING">WARNING · 警告</option>
+              <option value="ERROR">ERROR · 错误</option>
+              <option value="CRITICAL">CRITICAL · 严重错误</option>
+            </select></label>
+            <label for="logModule">模块<select id="logModule">
+              <option value="">全部模块</option>
+              <option value="sehuatang">Sehuatang</option>
+              <option value="javbee">JavBee</option>
+              <option value="x1080x">x1080x</option>
+              <option value="telegram">Telegram</option>
+              <option value="scheduler">调度</option>
+              <option value="database">数据库与存储</option>
+              <option value="system">系统</option>
+              <option value="unclassified">未分类（历史日志）</option>
+            </select></label>
+            <label for="logLines">条数<input
+                type="number"
+                id="logLines"
+                value="200"
+                min="10"
+                max="1000" /></label
+            ><label class="check"
+              ><input type="checkbox" id="logAuto" checked />自动刷新</label
+            >
+          </div>
+          <p id="logHint" class="hint" role="status" aria-live="polite">按所选条件显示最近的日志，异常堆栈随原记录展示。</p>
+          <pre id="logBox" tabindex="0" aria-label="日志内容">加载中…</pre>
+        </section>
+        <section
+          class="panel"
+          id="panel-config"
+          role="tabpanel"
+          aria-labelledby="tab-config"
+          hidden
+        >
+          <div class="toolbar">
+            <div>
+              <h2>配置文件</h2>
+              <p class="hint" id="configPath">读取后显示文件路径</p>
+            </div>
+            <div class="filters">
+              <button id="reloadConfig">重新加载</button
+              ><button class="primary" id="saveConfig">保存配置</button>
+            </div>
+          </div>
+          <textarea
+            id="configText"
+            aria-label="YAML 配置内容"
+            spellcheck="false"
+          ></textarea>
+          <div class="table-note">
+            <span id="configHint">保存前检查 YAML 语法；保存后重启服务生效</span
+            ><span>UTF-8</span>
+          </div>
+        </section>
+      </div>
+      <footer>
+        <span>采集工作台 · sehuatang / javbee / x1080x</span
+        ><span>状态每 5 秒同步</span>
+      </footer>
+    </main>
+    <div id="toast" class="toast" role="status" hidden></div>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const esc = (value) =>
+        String(value ?? "").replace(
+          /[&<>"']/g,
+          (c) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            })[c],
+        );
+      let activeTab = "runs",
+        configLoaded = false,
+        configDirty = false,
+        offset = 0,
+        lastStatus = null,
+        toastTimer,
+        panelRequest = 0;
+      const labels = {
+        success: "成功",
+        partial_success: "部分成功",
+        failed: "失败",
+        skipped: "已跳过",
+        already_running: "运行中",
+        due: "到期待重试",
+        waiting: "等待重试",
+        exhausted: "已停止",
+      };
+      function badge(state) {
+        return `<span class="badge ${esc(state === "success" ? "ok" : state)}">${esc(labels[state] || state || "—")}</span>`;
+      }
+      function date(value) {
+        if (!value) return null;
+        const d = new Date(value);
+        return Number.isNaN(d.getTime()) ? null : d;
+      }
+      function fmtTime(value) {
+        return date(value)?.toLocaleString("zh-CN", { hour12: false }) || "—";
+      }
+      function clockTime(value) {
+        return (
+          date(value)?.toLocaleTimeString("zh-CN", { hour12: false }) || "—"
+        );
+      }
+      function day(value) {
+        return date(value)?.toLocaleDateString("zh-CN") || "—";
+      }
+      function duration(seconds) {
+        seconds = Math.max(0, Math.floor(seconds));
+        return seconds < 60
+          ? `${seconds} 秒`
+          : seconds < 3600
+            ? `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`
+            : `${Math.floor(seconds / 3600)} 时 ${Math.floor((seconds % 3600) / 60)} 分`;
+      }
+      function countdown(value) {
+        const d = date(value);
+        if (!d) return "尚未排期";
+        const seconds = (d.getTime() - Date.now() - offset) / 1000;
+        return seconds <= 0 ? "即将执行" : `还有 ${duration(seconds)}`;
+      }
+      function tick() {
+        document
+          .querySelectorAll("[data-countdown]")
+          .forEach((el) => (el.textContent = countdown(el.dataset.countdown)));
+        document
+          .querySelectorAll("[data-started]")
+          .forEach(
+            (el) =>
+              (el.textContent = `已运行 ${duration((Date.now() + offset) / 1000 - Number(el.dataset.started))}`),
+          );
+      }
+      function toast(message, error = false) {
+        clearTimeout(toastTimer);
+        $("toast").textContent = message;
+        $("toast").className = "toast" + (error ? " error" : "");
+        $("toast").hidden = false;
+        toastTimer = setTimeout(() => ($("toast").hidden = true), 4000);
+      }
+      async function api(path, options = {}) {
+        const response = await fetch(path, {
+          ...options,
+          headers: {
+            "Content-Type": "application/json",
+            "X-Token": localStorage.getItem("sht_token") || "",
+            ...options.headers,
+          },
+        });
+        let data;
+        try {
+          data = await response.json();
+        } catch {
+          throw Error(`服务响应异常 (${response.status})`);
+        }
+        if (!response.ok)
+          throw Error(
+            typeof data.detail === "string"
+              ? data.detail
+              : `请求失败 (${response.status})`,
+          );
+        return data;
+      }
+      function report(error) {
+        $("errorBanner").textContent =
+          error.message + "；请检查访问设置或刷新重试。";
+        $("errorBanner").hidden = false;
+      }
+      async function act(button, path, payload, message) {
+        button.disabled = true;
+        let succeeded = false;
+        try {
+          await api(path, { method: "POST", body: JSON.stringify(payload) });
+          succeeded = true;
+          toast(message);
+          await refreshStatus();
+          await refreshPanel();
+        } catch (error) {
+          toast(error.message, true);
+        } finally {
+          if (
+            button.isConnected &&
+            (button.id !== "requeueExhausted" || !succeeded)
+          )
+            button.disabled = false;
+        }
+      }
+      async function refreshStatus() {
+        const data = await api("/api/status");
+        lastStatus = data;
+        offset = (date(data.server_time)?.getTime() || Date.now()) - Date.now();
+        $("sync").textContent = `已同步 ${clockTime(new Date())}`;
+        $("errorBanner").hidden = true;
+        $("storage").textContent = data.mongodb_enabled
+          ? "MongoDB 存储"
+          : "本地台账";
+        $("sourceCount").textContent =
+          `SOURCES / ${String(data.sources.length).padStart(2, "0")}`;
+        const tasks = [...(data.active_tasks || [])];
+        for (const source of data.sources) {
+          if (source.running && !tasks.some((t) => t.source === source.name))
+            tasks.push({
+              source: source.name,
+              description: `${source.name} 正在运行`,
+            });
+        }
+        for (const action of Object.values(data.actions || {})) {
+          if (
+            action.running &&
+            !tasks.some((t) => action.description.includes(t.source))
+          )
+            tasks.push(action);
+        }
+        $("livePanel").innerHTML =
+          `<div class="panel-kicker"><i class="dot ${tasks.length ? "active-dot" : ""}"></i>当前运行 <span>${String(tasks.length).padStart(2, "0")}</span></div>` +
+          (tasks.length
+            ? tasks
+                .map(
+                  (t) =>
+                    `<div class="active-task"><strong>${esc(t.description)}</strong>${t.started_at ? `<span class="elapsed" data-started="${Number(t.started_at)}"></span>` : ""}</div>`,
+                )
+                .join("")
+            : '<h2>所有任务已就绪</h2><div class="sub">暂无运行中的任务，等待下一次计划执行。</div>');
+        const jobs = (data.scheduler_jobs || [])
+            .filter((j) => date(j.next_run_time))
+            .sort((a, b) => date(a.next_run_time) - date(b.next_run_time)),
+          next = jobs[0];
+        $("nextPanel").innerHTML =
+          '<div class="panel-kicker">下一次调度</div>' +
+          (next
+            ? `<div class="next-line"><span class="next-time">${clockTime(next.next_run_time)}</span><span class="countdown" data-countdown="${esc(next.next_run_time)}"></span></div><div class="next-name">${esc(next.name)} · ${day(next.next_run_time)}</div>`
+            : '<div class="next-time">尚未排期</div><div class="next-name">当前进程没有可执行的调度计划</div>');
+        $("sources").innerHTML = data.sources
+          .map((source, i) => {
+            const job = jobs.find((j) => j.id === `crawl_${source.name}`),
+              task = tasks.find((t) => t.source === source.name),
+              running = source.running || !!task,
+              last = source.last_run;
+            return `<article class="source-card ${running ? "running" : ""}"><div class="source-top"><span class="source-index">0${i + 1}</span><h3>${esc(source.name)}</h3><span class="badge ${running ? "running" : source.enabled ? "ok" : ""}">${running ? "● 运行中" : source.enabled ? "已启用" : "未启用"}</span></div><div class="schedule"><div class="schedule-label">${running ? "当前任务 · " + esc(task?.kind === "retry" ? "失败重试" : task?.kind === "backfill" ? "分页补抓" : "抓取") : "下次执行"}</div><div class="schedule-value">${running ? "正在执行" : job ? clockTime(job.next_run_time) : "—"}</div><div class="schedule-meta">${running && task?.started_at ? `<span data-started="${Number(task.started_at)}"></span>` : `<span>${job ? day(job.next_run_time) : "未设置调度"}</span>`}${job ? `<span ${running ? "" : `data-countdown="${esc(job.next_run_time)}"`}>${running ? "下次 " + clockTime(job.next_run_time) : countdown(job.next_run_time)}</span>` : ""}</div></div><div class="last-run"><div>最近结果 ${last ? badge(last.status) : "暂无记录"}<small>${last ? fmtTime(last.created_at) : "等待首次执行"}</small></div><span>保存 <b class="positive">${esc(last?.saved ?? "—")}</b> / 失败 <b class="${last?.failed ? "negative" : ""}">${esc(last?.failed ?? "—")}</b></span></div><div class="source-actions"><button class="primary" data-action="crawl" data-source="${esc(source.name)}" ${running ? "disabled" : ""}>立即抓取</button><button data-action="dry" data-source="${esc(source.name)}" ${running ? "disabled" : ""}>试运行</button><button data-action="retry" data-source="${esc(source.name)}" ${running ? "disabled" : ""}>重试失败</button></div></article>`;
+          })
+          .join("");
+        tick();
+      }
+      async function refreshNetwork() {
+        const seq = ++panelRequest;
+        let data;
+        try { data = await api("/api/network"); }
+        catch (error) {
+          if (seq === panelRequest) {
+            $("networkNote").textContent = "线路状态读取失败，当前数据无法确认，请刷新重试。";
+            $("networkLines").innerHTML = "";
+          }
+          throw error;
+        }
+        if (seq !== panelRequest) return;
+        const rows = (data.lines || []).filter(row => !$("networkSource").value || row.source === $("networkSource").value);
+        $("checkNetwork").textContent = $("networkSource").value ? "检测当前来源" : "检测全部";
+        const states = {
+          healthy: ["正常", "ok"], unstable: ["偶发网络异常", "due"],
+          suspect: ["疑似异常", "failed"], diagnosing: ["诊断中", "running"],
+          recovered: ["已恢复", "ok"], stale: ["暂无近期数据", ""],
+          restricted: ["目标访问受限", "due"], challenge: ["需要站点验证", "due"],
+          proxy_auth: ["代理认证失败", "failed"], response_error: ["目标响应异常", "due"],
+        };
+        const outcomes = {ok: "原线路已能访问目标页面", network_error: "原线路访问目标仍有网络异常", deferred: "诊断暂缓，等待站点冷却", restricted: "目标站返回访问限制", challenge: "目标站返回验证页面", proxy_auth: "代理认证失败", response_error: "目标站返回异常响应"};
+        const evidence = {proxy_unreachable: "爬虫无法连接代理端口，请检查代理服务或容器网络。", target_path: "同线路测试地址可达，异常集中在目标站访问路径。", undetermined: "测试地址也未验证成功，暂无法区分线路与目标站故障。", deferred: "补充诊断暂缓，等待站点冷却。"};
+        const stamp = value => value == null ? "—" : fmtTime(new Date(value * 1000));
+        $("networkNote").textContent = rows.length ? `共 ${rows.length} 条线路记录 · 可在采集前独立检测 · 同一端口访问不同站点分别统计` : "暂无已配置线路；尚未发起请求不代表线路正常。";
+        $("networkLines").innerHTML = rows.map(row => {
+          const [label, tone] = states[row.state] || ["状态未知", ""];
+          const diagnosis = row.diagnostic;
+          const check = value => `${esc(outcomes[value.outcome] || "未确认")}${value.status ? ` · HTTP ${Number(value.status)}` : ""}${value.elapsed_ms != null ? ` · ${(value.elapsed_ms / 1000).toFixed(2)}s` : ""}${value.error ? `<br>${esc(value.error.summary)}` : ""}`;
+          return `<article class="network-card"><div class="network-top"><h3>${esc(row.source)}</h3><span class="badge ${tone}">${label}</span></div>
+            <div class="network-address">${esc(row.proxy === "direct" ? "直连" : row.proxy)}<br><span class="hint">${esc(row.target || "等待首次请求")}</span></div>
+            <dl class="network-stats"><div><dt>请求 / 重试</dt><dd>${Number(row.attempts || 0)} / ${Number(row.retries || 0)}</dd></div><div><dt>超时率</dt><dd>${row.timeout_rate == null ? "—" : (row.timeout_rate * 100).toFixed(1) + "%"}</dd></div><div><dt>平均耗时</dt><dd>${row.average_ms == null ? "—" : (row.average_ms / 1000).toFixed(2) + "s"}</dd></div></dl>
+            <div class="network-detail hint">最终失败 ${Number(row.failed || 0)} / 已完成 ${Number(row.completed || 0)} · 连续网络失败 ${Number(row.consecutive_failures || 0)}<br>最后成功 ${stamp(row.last_success)}<br>最后请求 ${stamp(row.last_attempt)}
+            ${row.last_error ? `<p>${esc(row.last_error.summary)}<br>curl ${esc(row.last_error.curl_code ?? "—")} · ${esc(row.last_error.phase)}</p>` : ""}
+            ${row.quarantined ? `<p>该线路访问此目标已暂停分配 · ${row.recovery_in > 0 ? `约 ${Number(row.recovery_in)} 秒后检测恢复` : "等待检测恢复"}</p>` : ""}
+            ${diagnosis ? `<p>最近检测 ${stamp(diagnosis.at)}<br>目标站：${check(diagnosis)}${diagnosis.control ? `<br>测试地址：${diagnosis.control.outcome === "ok" ? "可达" : check(diagnosis.control)}${diagnosis.control.outcome === "ok" ? ` · ${(diagnosis.control.elapsed_ms / 1000).toFixed(2)}s` : ""}` : ""}${diagnosis.evidence ? `<br>${esc(evidence[diagnosis.evidence] || "证据不足")}` : ""}</p>` : ""}</div>
+            <button data-network-source="${esc(row.source)}" data-network-slot="${Number(row.proxy_slot)}" ${row.state === "diagnosing" ? "disabled" : ""}>${row.state === "diagnosing" ? "检测中" : "检测此线路"}</button></article>`;
+        }).join("");
+      }
+      async function checkNetwork(button, source, proxySlot) {
+        if (button.disabled) return;
+        button.disabled = true;
+        try {
+          const payload = {source: source || null};
+          if (proxySlot !== undefined) payload.proxy_slot = proxySlot;
+          const result = await api("/api/network/check", {method: "POST", body: JSON.stringify(payload)});
+          toast(result.queued ? `已提交 ${result.queued} 条线路检测` : "线路正在检测，请稍后查看结果");
+          await refreshNetwork();
+        } catch (error) {
+          report(error);
+        } finally {
+          button.disabled = false;
+        }
+      }
+      async function refreshRuns() {
+        const seq = ++panelRequest;
+        const params = new URLSearchParams({
+          limit: $("runLimit").value,
+          source: $("runSource").value,
+        });
+        const data = await api("/api/runs?" + params);
+        if (seq !== panelRequest) return;
+        const rows = data.runs || [];
+        $("runsBody").innerHTML =
+          rows
+            .map(
+              (r) =>
+                `<tr><td class="number">${fmtTime(r.created_at)}</td><td>${esc(r.source)}${r.kind === "retry" ? '<span class="hint"> · 重试</span>' : ""}</td><td>${badge(r.status)}</td>${["discovered", "requested", "saved", "failed"].map((k) => `<td class="number ${k === "failed" && r[k] ? "negative" : ""}">${esc(r[k] ?? "—")}</td>`).join("")}<td class="number">${r.elapsed_ms != null ? (r.elapsed_ms / 1000).toFixed(1) + "s" : "—"}</td></tr>`,
+            )
+            .join("") ||
+          '<tr><td class="empty" colspan="8">暂无运行记录，完成首次采集后将在此显示。</td></tr>';
+        $("runsNote").textContent = `显示最近 ${rows.length} 条记录`;
+      }
+      async function refreshFailures() {
+        const seq = ++panelRequest;
+        const params = new URLSearchParams({
+          limit: "200",
+          source: $("failureSource").value,
+          state: $("failureState").value,
+        });
+        const data = await api("/api/failures?" + params);
+        if (seq !== panelRequest) return;
+        const counts = data.counts || {};
+        const source = $("failureSource").value;
+        $("requeueExhausted").disabled = !source || !counts.exhausted;
+        $("requeueExhausted").textContent =
+          `重新入队已停止${source ? ` (${counts.exhausted || 0})` : ""}`;
+        $("requeueExhausted").title = source
+          ? `只处理 ${source} 已停止的记录`
+          : "先选择一个来源";
+        $("failureCount").textContent = Object.values(counts).reduce(
+          (a, b) => a + b,
+          0,
+        );
+        $("failurePolicy").textContent =
+          `每轮最多累计失败 ${data.max_failures} 次（含首次失败），达到上限或遇明确封锁、会员限制时停止自动重试`;
+        $("failureStats").innerHTML = ["due", "waiting", "exhausted"]
+          .map((s) => `<span>${labels[s]} <b>${counts[s] || 0}</b></span>`)
+          .join("");
+        $("failuresBody").innerHTML =
+          (data.failures || [])
+            .map(
+              (r) =>
+                `<tr><td>${esc(r.source)}<span class="error-detail number">${esc(r.source_key)}</span></td><td>${esc(r.last_stage || r.stage)}</td><td>${esc(r.error_type || "—")}<span class="error-detail">${esc(r.error_message || "旧记录未保存具体原因")}</span></td><td class="number" title="历史累计失败 ${Number(r.failure_count) || 0} 次">${Number(r.retry_count)} / ${Number(r.max_failures)}<span class="error-detail">历史累计 ${Number(r.failure_count) || 0}</span></td><td>${badge(r.state)}</td><td class="number">${r.state === "exhausted" ? "已停止" : fmtTime(r.next_retry_at)}</td><td>${r.state === "exhausted" ? `<button class="requeue" data-source="${esc(r.source)}" data-key="${esc(r.source_key)}" data-stage="${esc(r.stage)}">重新入队</button>` : "—"}</td></tr>`,
+            )
+            .join("") ||
+          '<tr><td class="empty" colspan="7">当前筛选下没有失败记录。</td></tr>';
+      }
+      async function refreshNotifications() {
+        const data = await api("/api/notifications");
+        const stateNames = {
+          queued: "等待发送",
+          sending: "发送中",
+          retry_wait: "等待重试",
+          sent: "已发送",
+          failed: "发送失败",
+          requeued: "已重新入队",
+          interrupted: "已中断",
+        };
+        $("notificationEnabled").textContent = data.closing
+          ? "队列正在关闭"
+          : data.enabled
+            ? "通知已启用"
+            : "通知未启用";
+        $("notificationEnabled").className =
+          "badge " + (data.enabled ? "ok" : "");
+        $("notificationStats").innerHTML =
+          `<span>等待 <b>${Number(data.queued)} / ${Number(data.capacity)}</b></span>
+          <span>处理中 <b>${data.active ? 1 : 0}</b></span><span>已发送 <b>${Number(data.sent)}</b></span>
+          <span>失败 <b>${Number(data.failed)}</b></span><span>未入队 <b>${Number(data.rejected)}</b></span>`;
+        $("notificationWarning").hidden = !data.rejected;
+        $("notificationWarning").textContent =
+          `本进程有 ${Number(data.rejected)} 条通知因队列已满或关闭未能入队；这些通知未保存在队列中。`;
+        const rows = [
+          ...(data.active ? [data.active] : []),
+          ...(data.pending || []),
+          ...(data.history || []),
+        ];
+        $("notificationBody").innerHTML =
+          rows
+            .map(
+              (row) => `<tr>
+          <td class="number">${fmtTime(new Date(row.created_at * 1000))}</td>
+          <td>${esc(row.source)}<span class="error-detail number">${esc(row.key)}</span></td>
+          <td><span class="error-detail" style="color:var(--ink)">${esc(row.title)}</span>
+            ${row.error ? `<span class="error-detail negative">${esc(row.error)}</span>` : ""}</td>
+          <td><span class="badge ${row.state === "failed" ? "failed" : row.state === "sent" ? "ok" : row.state === "sending" ? "running" : row.state === "retry_wait" ? "due" : ""}">${esc(stateNames[row.state] || row.state)}</span>
+            ${row.next_retry_at ? `<span class="error-detail">${fmtTime(new Date(row.next_retry_at * 1000))}</span>` : ""}</td>
+          <td class="number">${Number(row.attempts)} / ${Number(data.max_attempts)}</td>
+          <td class="number">${row.total_parts == null ? "—" : `${Number(row.completed_parts)} / ${Number(row.total_parts)}`}</td>
+          <td>${row.state === "failed" ? `<button class="requeue" data-notification-id="${esc(row.id)}" ${!data.enabled || data.closing ? "disabled" : ""}>重新入队</button>` : "—"}</td>
+        </tr>`,
+            )
+            .join("") ||
+          '<tr><td class="empty" colspan="7">当前进程暂无通知任务。</td></tr>';
+      }
+      async function refreshBackfill() {
+        const data = await api("/api/backfill-progress");
+        $("progressBody").innerHTML =
+          Object.entries(data.progress || {})
+            // 兼容旧 source:partition 和新 scope:source:partition 检查点。
+            .filter(([key]) => key.split(":").slice(-2)[0] === $("bfSource").value)
+            .map(
+              ([key, page]) =>
+                `<tr><td>${esc(key)}</td><td class="number">${esc(page)}</td></tr>`,
+            )
+            .join("") ||
+          '<tr><td class="empty" colspan="2">该来源暂无检查点。</td></tr>';
+      }
+      let logRefreshSequence = 0;
+      async function refreshLogs(resetScroll = false) {
+        const sequence = ++logRefreshSequence;
+        const count = Math.max(
+          10,
+          Math.min(1000, Number($("logLines").value) || 200),
+        );
+        const params = new URLSearchParams({
+          file: $("logFile").value, lines: String(count),
+          level: $("logLevel").value, module: $("logModule").value,
+        });
+        const data = await api(`/api/logs?${params}`);
+        if (sequence !== logRefreshSequence) return;
+        const box = $("logBox"),
+          scrollTop = box.scrollTop,
+          stick = resetScroll || box.scrollHeight - box.scrollTop - box.clientHeight < 25;
+        box.textContent = (data.lines || []).join("\n") || "当前筛选下没有日志，可切换为全部级别或全部模块。";
+        box.classList.toggle("empty-log", !(data.lines || []).length);
+        box.scrollTop = stick ? box.scrollHeight : scrollTop;
+        $("logHint").textContent = `显示最近 ${data.matched_count || 0} 条匹配日志（最多 ${count} 条），异常堆栈随原记录展示。`
+          + (data.scan_limited ? " 已扫描到读取上限，更早的日志可能未包含在结果中。" : "")
+          + " 历史日志没有模块标记时归为未分类。";
+      }
+      async function loadConfig() {
+        if (configDirty && !confirm("重新加载会覆盖尚未保存的编辑，是否继续？"))
+          return;
+        const data = await api("/api/config");
+        $("configPath").textContent = data.path;
+        $("configText").value = data.content;
+        configLoaded = true;
+        configDirty = false;
+        $("configHint").textContent = "保存后重启服务生效";
+      }
+      async function refreshPanel() {
+        if (activeTab === "runs") await refreshRuns();
+        else if (activeTab === "failures") await refreshFailures();
+        else if (activeTab === "notifications") await refreshNotifications();
+        else if (activeTab === "backfill") await refreshBackfill();
+        else if (activeTab === "logs") await refreshLogs();
+        else if (activeTab === "network") await refreshNetwork();
+        else if (!configLoaded) await loadConfig();
+      }
+      async function switchTab(name) {
+        activeTab = name;
+        document.querySelectorAll("[role=tab]").forEach((el) => {
+          const selected = el.dataset.tab === name;
+          el.setAttribute("aria-selected", selected);
+          el.tabIndex = selected ? 0 : -1;
+          $("panel-" + el.dataset.tab).hidden = !selected;
+        });
+        try {
+          await refreshPanel();
+        } catch (e) {
+          report(e);
+        }
+      }
+      $("sources").addEventListener("click", (event) => {
+        const b = event.target.closest("[data-action]");
+        if (!b || b.disabled) return;
+        const retry = b.dataset.action === "retry";
+        act(
+          b,
+          "/api/actions/" + (retry ? "retry-failed" : "crawl"),
+          { source: b.dataset.source, dry_run: b.dataset.action === "dry" },
+          retry ? "已提交到期失败重试任务" : "已提交采集任务",
+        );
+      });
+      $("checkNetwork").onclick = () => checkNetwork($("checkNetwork"), $("networkSource").value);
+      $("networkLines").addEventListener("click", event => {
+        const button = event.target.closest("[data-network-source]");
+        if (button) checkNetwork(button, button.dataset.networkSource, Number(button.dataset.networkSlot));
+      });
+      $("failuresBody").addEventListener("click", (event) => {
+        const b = event.target.closest(".requeue");
+        if (!b) return;
+        act(
+          b,
+          "/api/failures/requeue",
+          {
+            source: b.dataset.source,
+            key: b.dataset.key,
+            stage: b.dataset.stage,
+          },
+          "已重新入队，可点击来源的「重试失败」立即执行",
+        );
+      });
+      $("notificationBody").addEventListener("click", (event) => {
+        const button = event.target.closest("[data-notification-id]");
+        if (button && !button.disabled)
+          act(
+            button,
+            "/api/notifications/retry",
+            { id: button.dataset.notificationId },
+            "通知已重新入队，将从未完成的分组继续",
+          );
+      });
+      $("backfillForm").addEventListener("submit", (event) => {
+        event.preventDefault();
+        const source = $("bfSource").value,
+          start = Number($("bfStart").value),
+          end = Number($("bfEnd").value);
+        if (end < start) {
+          toast("结束页不能小于起始页", true);
+          return;
+        }
+        const partitions = $("bfPartition")
+          .value.split(/[,，]/)
+          .map((x) => x.trim())
+          .filter(Boolean);
+        if (partitions.some((p) => !/^\d+$/.test(p))) {
+          toast("分区 ID 必须为数字，以逗号分隔", true);
+          return;
+        }
+        const payload = {
+          source,
+          start_page: start,
+          end_page: end,
+          resume: $("bfResume").checked,
+          dry_run: $("bfDry").checked,
+        };
+        if (partitions.length)
+          payload[source === "sehuatang" ? "fids" : "typeids"] =
+            partitions.map(Number);
+        act(
+          event.submitter,
+          "/api/actions/backfill-pages",
+          payload,
+          "已提交分页补抓任务",
+        );
+      });
+      $("tokenButton").onclick = () => {
+        const value = prompt(
+          "设置访问 Token（留空清除）",
+          localStorage.getItem("sht_token") || "",
+        );
+        if (value !== null) {
+          localStorage.setItem("sht_token", value.trim());
+          refreshStatus().then(refreshPanel).catch(report);
+        }
+      };
+      $("restartButton").onclick = async () => {
+        if (!confirm("确认重启服务？正在运行的任务会被中断。")) return;
+        try {
+          await api("/api/actions/restart", { method: "POST" });
+          toast("服务正在重启，稍后刷新页面");
+          setTimeout(() => location.reload(), 5000);
+        } catch (e) {
+          toast(e.message, true);
+        }
+      };
+      $("saveConfig").onclick = async () => {
+        try {
+          await api("/api/config", {
+            method: "PUT",
+            body: JSON.stringify({ content: $("configText").value }),
+          });
+          configDirty = false;
+          $("configHint").textContent = "配置已保存，重启服务后生效";
+          toast("配置已保存");
+        } catch (e) {
+          toast(e.message, true);
+        }
+      };
+      $("configText").oninput = () => {
+        configDirty = true;
+        $("configHint").textContent = "有尚未保存的修改";
+      };
+      $("reloadConfig").onclick = () => loadConfig().catch(report);
+      $("refreshButton").onclick = () =>
+        refreshStatus().then(refreshPanel).catch(report);
+      $("requeueExhausted").onclick = () =>
+        act(
+          $("requeueExhausted"),
+          "/api/failures/requeue-exhausted",
+          { source: $("failureSource").value },
+          "该来源已停止的记录已重新入队，可点击「重试失败」执行",
+        );
+      for (const id of [
+        "runSource",
+        "networkSource",
+        "runLimit",
+        "failureSource",
+        "failureState",
+        "bfSource",
+      ])
+        $(id).onchange = () => refreshPanel().catch(report);
+      for (const id of ["logFile", "logLevel", "logModule", "logLines"])
+        $(id).onchange = () => refreshLogs(true).catch(report);
+      document
+        .querySelectorAll("[role=tab]")
+        .forEach((el) => (el.onclick = () => switchTab(el.dataset.tab)));
+      document.querySelector(".tabs").addEventListener("keydown", (event) => {
+        const tabs = [...document.querySelectorAll("[role=tab]")],
+          i = tabs.indexOf(document.activeElement);
+        if (i < 0) return;
+        let next;
+        if (event.key === "ArrowRight") next = (i + 1) % tabs.length;
+        else if (event.key === "ArrowLeft")
+          next = (i + tabs.length - 1) % tabs.length;
+        else if (event.key === "Home") next = 0;
+        else if (event.key === "End") next = tabs.length - 1;
+        else return;
+        event.preventDefault();
+        tabs[next].focus();
+        switchTab(tabs[next].dataset.tab);
+      });
+      window.addEventListener("beforeunload", (event) => {
+        if (configDirty) {
+          event.preventDefault();
+          event.returnValue = "";
+        }
+      });
+      async function poll() {
+        if (!document.hidden) {
+          try {
+            await refreshStatus();
+            if (
+              activeTab !== "config" &&
+              (activeTab !== "logs" || $("logAuto").checked)
+            )
+              await refreshPanel();
+          } catch (e) {
+            report(e);
+          }
+        }
+        setTimeout(poll, 5000);
+      }
+      refreshFailures()
+        .catch(() => {})
+        .then(poll);
+      setInterval(tick, 1000);
+    </script>
+  </body>
+</html>

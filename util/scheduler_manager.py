@@ -225,14 +225,100 @@ def create_async_job_wrapper(async_func: Callable, job_name: str = ""):
     return wrapper
 
 
+def _add_retry_failed_job(manager: SchedulerManager, full_config: dict) -> None:
+    """注册失败台账自动重试任务。
+
+    每个周期先查各来源是否有到期（next_retry_at 已过）的失败记录，
+    有才触发 retry_failed 运行；没有则静默跳过，不产生运行历史和日志。
+    可通过 crawler.retry_failed.enabled: false 关闭。
+    """
+    retry_config = ((full_config.get("crawler") or {}).get("retry_failed") or {})
+    if not retry_config.get("enabled", True):
+        log.info("失败台账自动重试已关闭 (crawler.retry_failed.enabled)")
+        return
+    try:
+        interval_minutes = max(5, int(retry_config.get("interval_minutes", 60)))
+    except (TypeError, ValueError):
+        interval_minutes = 60
+
+    def retry_job():
+        try:
+            from main import crawl_sources
+            from scrapers.infrastructure import build_failure_store
+            from scrapers.registry import source_registry
+
+            config = get_config() or {}
+            store = build_failure_store(
+                mongodb_enabled=bool(get_config("mongodb.enable", False)),
+            )
+            due_sources = [
+                name
+                for name in source_registry.names()
+                if source_registry.is_enabled(config, name)
+                and store.due_targets(name)
+            ]
+            if not due_sources:
+                return
+            log.info(f"失败台账自动重试触发: {due_sources}")
+            run_async_task(crawl_sources(due_sources, retry_failed=True))
+        except Exception as e:
+            ExceptionHandler.handle_and_log(e, "失败台账自动重试出错")
+
+    manager.add_interval_job(
+        retry_job,
+        interval_minutes * 60,
+        "retry_failed_auto",
+        "失败台账自动重试",
+        max_instances=1,
+    )
+
+
 def setup_default_scheduler() -> SchedulerManager:
     """设置默认调度器"""
     manager = SchedulerManager()
-    
+
     if not manager.initialize():
         raise RuntimeError("调度器初始化失败")
-    
-    # 从配置文件读取调度配置
+
+    # 优先使用每来源独立调度；未配置时兼容旧的全量 cron。
+    full_config = get_config() or {}
+    _add_retry_failed_job(manager, full_config)
+    crawler_sources = ((full_config.get("crawler") or {}).get("sources") or {})
+    source_jobs = 0
+    if crawler_sources:
+        from main import crawl_sources
+        from scrapers.registry import source_registry
+
+        for source_name in source_registry.names():
+            source_config = crawler_sources.get(source_name) or {}
+            cron_expression = (source_config.get("schedule") or {}).get("cron")
+            enabled = source_config.get(
+                "enabled",
+                source_registry.is_enabled(full_config, source_name),
+            )
+            if not enabled or not cron_expression:
+                continue
+
+            async def source_task(name=source_name):
+                return await crawl_sources([name])
+
+            wrapped_task = create_async_job_wrapper(
+                source_task,
+                f"{source_name} 抓取任务",
+            )
+            if manager.add_cron_job(
+                wrapped_task,
+                cron_expression,
+                f"crawl_{source_name}",
+                f"{source_name} 抓取任务",
+                max_instances=1,
+            ):
+                source_jobs += 1
+
+    if source_jobs:
+        return manager
+
+    # 旧配置兼容：所有已启用来源仍由一个任务顺序执行。
     schedule_config = get_config("schedule", {})
     cron_expression = schedule_config.get("schedule_cron")
     

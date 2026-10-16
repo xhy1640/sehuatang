@@ -1,121 +1,150 @@
-# 配置文件示例
-# 请复制此文件为 config.yaml 并填入真实配置
+# =====================================================================
+# sehuatang v2 数据抓取系统 - 纯享精简配置（仅保留 sehuatang）
+# ---------------------------------------------------------------------
+# 💡 提示：
+#   1. 部署时请复制本文件为 config/config.yaml
+#   2. 只保留了 sehuatang 论坛抓取相关的配置，已彻底剔除无关来源。
+#   3. Web 管理页面（8181 端口）可在线修改此文件，保存后重启容器生效。
+#   4. 必填核心项：mongodb、sehuatang.cookie、proxy、web.token。
+# =====================================================================
 
+# ─────────────────────────────────────────────────────────────────────
+# 1.【MongoDB 数据库】用于存储抓取帖子数据、运行历史、失败台账
+# ─────────────────────────────────────────────────────────────────────
 mongodb:
   enable: true
-  db_host: "your_mongodb_host"
-  db_port: 27017
-  connection_string: "mongodb+srv://username:password@cluster.mongodb.net/database"
+  # 推荐使用连接串（use_conn_str: true 时忽略 db_host / db_port）
+  # 连接串格式：
+  #   - Atlas 云数据库: mongodb+srv://用户名:密码@cluster.xxx.mongodb.net/数据库名
+  #   - 本机/自建单机:  mongodb://用户名:密码@host.docker.internal:27017/sehuatang
+  # ⚠️ 特别提醒：密码中若含有特殊字符（@、:、/、# 等），必须进行 URL 编码（例如 @ 需转为 %40）
+  connection_string: "mongodb+srv://username:password@cluster.mongodb.net/sehuatang"
   use_conn_str: true
+  db_host: "host.docker.internal"
+  db_port: 27017
 
-mysql:
-  enable: false
-  host: "localhost"
-  port: 3306
-  user: "your_username"
-  password: "your_password"
-  db: "sehuatang"
-
+# ─────────────────────────────────────────────────────────────────────
+# 2.【sehuatang 论坛设置】Discuz 核心业务参数
+# ─────────────────────────────────────────────────────────────────────
 sehuatang:
-  # 域名
+  # 论坛访问域名（不需要带 https://）
   domain_name: "sehuatang.org"
   domain_get_url: "https://sehuatang.org/forum-103-1.html"
+
+  # 🔑【核心】论坛登录 Cookie
+  # 获取方法：
+  #   1. 浏览器打开并正常登录 sehuatang 论坛
+  #   2. 按 F12 打开开发者工具 -> 切换到 Network（网络）标签页
+  #   3. 刷新页面，点击任意一个指向论坛域名的请求
+  #   4. 在 Request Headers（请求头）中找到 Cookie，复制完整整串填入下方引号中
   cookie: "your_cookie_here"
-  # 板块id
+
+  # 抓取的板块列表：
+  # 键（数字）为板块 fid（可查看板块 URL，例如 forum-103-1.html 中的 103 即为 fid）
+  # 值为板块备注名称（用于 Web 界面与日志中识别）
   fid:
     103: "高清中文字幕"
     104: "素人有码系列"
-    # 可以添加更多板块
+    # 按需追加其他板块 fid：
     # 37: "亚洲有码原创"
     # 36: "亚洲无码原创"
+    # 2:  "国产原创"
 
-  # 抓取页数，10代表1-10页
+  # 每次定时调度抓取每个板块的列表前 N 页（5 代表抓取第 1 到第 5 页）
   page_num: 5
-  # 抓取日期(格式: yyyy-mm-dd), 如果为空, 则抓取当前日期
-  # 支持正则匹配，可输入 yyyy-mm 抓取指定月份的所有日期
+
+  # 抓取指定发帖日期的帖子：
+  #   - null: 抓取当天（默认）
+  #   - "2025-01-15": 仅抓取指定这一天
+  #   - "2025-01": 正则匹配，抓取 2025 年 1 月份整月
   date: null
 
-proxy:
-  # 代理服务器
-  proxy_url: "http://127.0.0.1:7890"
-  # 是否使用代理
-  proxy_enable: true
+# ─────────────────────────────────────────────────────────────────────
+# 3.【爬虫引擎配置】并发控制、重试策略与调度周期
+# ─────────────────────────────────────────────────────────────────────
+crawler:
+  # 失败台账自动重试：抓取过程中偶发失败的帖子会自动记录，定期重新捞取
+  retry_failed:
+    enabled: true
+    interval_minutes: 60     # 每隔 60 分钟检查一次已到期的失败记录
+    max_failures: 5          # 单个帖子重试累计达到 5 次仍失败则停止重试
 
+  # 全局默认参数
+  defaults:
+    concurrency: 6           # 抓取并发工作线程数
+    per_proxy_concurrency: 2 # 单个代理端口允许的最大并发
+    storage:
+      batch_size: 10         # 攒满 10 条批量写入一次数据库
+      flush_interval_seconds: 1  # 或者等待 1 秒立即写入
+      queue_capacity: 100
+      retry_attempts: 3
+      retry_delay_seconds: 1
+    http:
+      timeout: 30            # 单次请求超时时间（秒）
+      impersonate: "chrome110"  # 模拟 Chrome 浏览器指纹（应对反爬）
+      retry:
+        attempts: 3          # 遇到网络抖动或 5xx 自动重试 3 次
+        base_delay: 2
+        max_delay: 15
+        jitter: 0.3
+        statuses: [408, 425, 429, 500, 502, 503, 504]
+
+  # 数据来源独立配置
+  sources:
+    sehuatang:
+      enabled: true          # 启用 sehuatang 抓取
+      concurrency: 10        # sehuatang 专属并发
+      per_proxy_concurrency: 3
+      rate_limit:
+        min_interval_seconds: 0.5  # 同端口请求间隔至少 0.5 秒，避免请求过快被论坛封 IP
+      http:
+        timeout: 30
+        proxy:
+          enabled: true
+          # ⚠️【Docker 避坑要点】
+          # 在容器内部不能填 127.0.0.1（那是指容器自身）：
+          #   - macOS Docker Desktop 请填: "http://host.docker.internal:7890"
+          #   - Linux 宿主机请填: "http://宿主机局域网IP:7890"
+          url: "http://host.docker.internal:7890"
+      challenge:
+        # CF 盾过盾服务（sehuatang 平时直接走 Cookie 即可；若遇 Cloudflare 盾才需配置）
+        # 默认留空；若启用了 compose 里的 byparr 则填: "http://byparr:8191/v1"
+        flaresolverr_url: ""
+      schedule:
+        cron: "0 2 * * *"    # 每天凌晨 02:00 自动执行一次（容器内时区 Asia/Shanghai）
+
+# ─────────────────────────────────────────────────────────────────────
+# 4.【Web 管理控制台】(http://127.0.0.1:8181)
+# ─────────────────────────────────────────────────────────────────────
+web:
+  host: "0.0.0.0"            # 容器内部监听所有接口
+  port: 8181
+  # 🔑 Web 控制台访问口令（Token）：
+  # 监听 0.0.0.0 时系统强制要求设置 Token。
+  # 进入管理页后，点击右上角的 "Token" 按钮填入此密码即可解锁全部操作与在线改配功能。
+  # 建议与 docker-compose.yml 中的 SHT_WEB_TOKEN 保持一致。
+  token: "change-me-to-a-long-random-string"
+
+# ─────────────────────────────────────────────────────────────────────
+# 5.【消息推送】Telegram 通知（可选）
+# ─────────────────────────────────────────────────────────────────────
 sendMessage:
-  # 企业微信推送
-  send_wecom_enable: false
-  corp_id: "your_corp_id"
-  corp_secret: "your_corp_secret"
-  agent_id: 1000002
-  media_id: "your_media_id"
-  to_user: "@all"
-  
-  # Telegram 推送
-  send_telegram_enable: true
-  tg_bot_token: "your_bot_token"
-  tg_chat_id: "your_chat_id"
-  image_proxy_url: "https://your-image-proxy.com"
+  # 是否开启抓取完成后的 TG 机器人推送（不需要请直接设为 false）
+  send_telegram_enable: false
+  tg_bot_token: "your_bot_token"     # 从 @BotFather 获取
+  tg_chat_id: "your_chat_id"         # 接收消息的用户 ID 或群组 ID
+  image_proxy_url: ""                # 图片反代地址（选填，无反代留空）
+  queue:
+    capacity: 1000
+    max_attempts: 5
+    min_interval_seconds: 1
+    shutdown_timeout_seconds: 30
 
-# 定时任务配置
-schedule:
-  # 简单时间配置（已废弃，建议使用cron）
-  schedule_time:
-    - "01:00"
-    - "02:00"
-    - "03:00"
-    - "04:00"
-  
-  # Cron表达式配置（推荐）
-  # 格式：分 时 日 月 周
-  # 示例：每天凌晨2点执行
-  schedule_cron: "0 2 * * *"
-
-# 日志配置
+# ─────────────────────────────────────────────────────────────────────
+# 6.【日志输出】
+# ─────────────────────────────────────────────────────────────────────
 logging:
-  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
-  max_file_size: 10485760  # 10MB
-  backup_count: 5
-  console_output: true
-
-# 性能配置
-performance:
-  max_concurrent_requests: 10
-  request_timeout: 30
-  retry_attempts: 3
-  retry_delay: 5
-
-
-# 浏览器配置
-browser:
-  # 多标签页配置
-  max_tabs: 3  # 最大标签页数量，建议2-5个，过多可能导致内存占用过高
-  tab_timeout: 30  # 获取标签页的超时时间（秒）
-  enable_multi_tab: true  # 是否启用多标签页模式，false则使用传统单页面模式
-
-  # 智能等待配置（新功能）
-  wait_strategy: "smart"  # 等待策略: "smart"(智能等待) 或 "random"(随机等待)
-  doc_load_timeout: 15    # 文档加载超时时间（秒），建议10-20秒
-  min_wait_time: 1        # 最小等待时间（秒），确保页面稳定
-  max_wait_time: 3        # 最大等待时间（秒），平衡速度和稳定性
-
-  # 传统等待配置（备用）
-  sleep_range: [3, 5]     # 随机等待时间范围（秒），仅在wait_strategy为"random"时使用
-
-  # 浏览器基础配置
-  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-  max_retries: 3  # 页面加载失败时的最大重试次数
-  sleep_range: [2, 4]  # 页面加载后的随机等待时间范围（秒）
-  page_load_timeout: 30  # 页面加载超时时间（秒）
-  cloudflare_timeout: 10  # Cloudflare验证超时时间（秒）
-
-  # 浏览器启动参数（高级配置）
-  arguments:
-    - "--headless=new"              # 无头浏览器模式
-    - "--no-sandbox"                # Docker环境必需
-    - "--disable-dev-shm-usage"     # 禁用/dev/shm使用
-    - "--disable-gpu"               # 禁用GPU加速
-    - "--disable-extensions"        # 禁用扩展
-    - "--disable-setuid-sandbox"    # 禁用setuid沙盒
-    - "--remote-debugging-port=9222" # 远程调试端口
-    - "--disable-web-security"      # 禁用Web安全
-    - "--ignore-certificate-errors" # 忽略证书错误
+  level: "INFO"              # 日志级别: DEBUG / INFO / WARNING / ERROR
+  max_file_size: 10485760    # 单个日志文件最大 10MB，超限自动轮转
+  backup_count: 5            # 保留最近 5 份历史日志
+  console_output: true       # 控制台标准输出（方便 docker logs 查看）

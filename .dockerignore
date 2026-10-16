@@ -69,9 +69,6 @@ docker-compose*.yml
 *_backup.*
 config_bak.yaml
 
-# Effect pictures (demo images)
-effect picture/
-
 # Development tools
 .pre-commit-config.yaml
 .flake8
@@ -81,6 +78,7 @@ setup.cfg
 tox.ini
 
 # Database files
+data/
 *.db
 *.sqlite
 *.sqlite3
@@ -89,6 +87,3 @@ tox.ini
 config/config.yaml
 .env
 .env.local
-
-# Scripts (keep only essential ones)
-scripts/cleanup.py

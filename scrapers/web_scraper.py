@@ -1,403 +1,890 @@
 """
-Web爬虫核心模块
-负责协调整个数据抓取流程
+Web 爬虫核心模块（HTTP 版）
+- 抓取层走 curl_cffi（见 scrapers/http_client.py），不再依赖浏览器
+- 列表页 / 详情页用 ThreadPoolExecutor 并发拉取
 """
-import asyncio
+import json
 import time
-from typing import List, Dict, Any, Optional
-from drissio import BrowserAutomation
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date as calendar_date, datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlencode
+
 from util.log_util import log
-from util.config import domain, page_num, date, proxy, proxy_enable
+from util.config import date, domain, mongodb_enable, page_num
 from util.read_config import get_config
-from .page_parser import PageParser
-from .data_processor import DataProcessor
+
 from .data_manager import DataManager
+from .data_processor import DataProcessor
+from .http_client import shared_http_client
+from scrapers.core.rate_limit import BackfillHttpClient
 from .notification_manager import NotificationManager
+from .page_parser import PageParser
+from .core.contracts import CrawlFailure
+from .core.config import load_storage_settings, StorageSettings
+from .core.storage import BatchWriter, PendingWrite, completed_results, retry_resource_write
+from .infrastructure import build_failure_store
+
+
+def _new_run_stats(dry_run=False):
+    return {"discovered": 0, "requested": 0, "succeeded": 0, "saved": 0,
+            "failed": 0, "existing": 0, "filtered": 0, "dry_run": dry_run,
+            "list_requested": 0, "list_succeeded": 0, "stage_failures": {}, "errors": []}
+
+
+def _add_run_failure(summary, stage, count, message):
+    if count <= 0:
+        return
+    summary["failed"] += count
+    summary["stage_failures"][stage] = summary["stage_failures"].get(stage, 0) + count
+    if len(summary["errors"]) < 20:
+        summary["errors"].append({"stage": stage, "message": str(message)[:500]})
+
+
+def _finish_run_stats(summary, started):
+    successful = summary["succeeded"] or summary["filtered"]
+    if not summary["requested"]:
+        successful = successful or summary["existing"]
+    if not summary["requested"] and set(summary["stage_failures"]) == {"list"}:
+        successful = successful or summary["list_succeeded"]
+    summary["status"] = ("success" if not summary["failed"] else
+                         "partial_success" if successful else "failed")
+    summary["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+    return summary
 
 
 class WebScraper:
-    """Web爬虫主类"""
+    """Web 爬虫主类"""
 
-    def __init__(self):
+    def __init__(
+        self,
+        target_date: Optional[str] = None,
+        dry_run: bool = False,
+        failure_store=None,
+    ):
         self.log = log
-
-        # 从配置文件获取浏览器配置
-        browser_config = get_config("browser", {})
-        max_tabs = browser_config.get("max_tabs", 3)
-        enable_multi_tab = browser_config.get("enable_multi_tab", True)
-
-        # 初始化浏览器自动化实例
-        self.browser = BrowserAutomation(
-            proxy_enable=proxy_enable,
-            proxy_url=proxy,
-            max_tabs=max_tabs
+        self.http = shared_http_client()
+        self.storage_settings = load_storage_settings(get_config(), "sehuatang")
+        self.workers = self.http.settings.concurrency
+        self.target_date = target_date
+        self.dry_run = dry_run
+        self.failure_store = failure_store or build_failure_store(
+            mongodb_enabled=bool(mongodb_enable)
         )
 
-        # 存储配置
-        self.enable_multi_tab = enable_multi_tab
-        self.max_tabs = max_tabs
-
         self.page_parser = PageParser()
-        self.data_processor = DataProcessor()
+        self.data_processor = DataProcessor(target_date)
         self.data_manager = DataManager()
         self.notification_manager = NotificationManager()
 
-    async def crawl_forum_section(self, fid: int) -> str:
-        """
-        爬取论坛板块数据
-        
-        Args:
-            fid: 板块ID
-            
-        Returns:
-            爬取结果消息
-        """
-        self.log.info(f"开始爬取板块 {fid}")
+    # ---------- 对外入口 ----------
 
+    async def crawl_forum_section(self, fid: int) -> Dict[str, Any]:
+        started = time.monotonic()
+        summary = _new_run_stats(self.dry_run)
+        summary["fid"] = fid
+        self.log.info(f"开始爬取板块 {fid}")
+        stage = "list"
         try:
-            # 第一阶段：获取板块页面信息
-            plate_info_list, tid_list = await self._get_plate_info_batch(fid)
+            info_list, _ = self._get_plate_info_batch(fid, summary=summary)
+            # 分页中重复出现的帖子只计一次发现和请求。
+            by_tid = {str(info["tid"]): info for info in info_list}
+            info_list = list(by_tid.values())
+            summary["discovered"] = len(info_list)
+            if info_list:
+                stage = "select"
+                _, new_info = self.data_manager.compare_existing_data(list(by_tid), fid, info_list)
+                summary["existing"] = len(info_list) - len(new_info)
+                stage = "detail"
+                notify_records = self._process_detail_targets(new_info, fid, summary)
+                if notify_records and not self.dry_run:
+                    # 通知入队不属于采集成功/失败判定。
+                    try:
+                        summary["notifications"] = self.notification_manager.enqueue_notifications(notify_records, fid)
+                    except Exception as exc:
+                        self.log.error(f"通知入队异常: fid={fid} error={type(exc).__name__}")
+        except Exception as exc:
+            _add_run_failure(summary, stage, 1, exc)
+            self.log.error(f"爬取板块 {fid} 时出错: {exc}")
+        return _finish_run_stats(summary, started)
+
+    def _process_detail_targets(self, info_list, fid, summary):
+        """详情请求、校验和保存，发生异常时保留已经确认的统计。"""
+        if not info_list:
+            return []
+        if hasattr(type(self.http), "iter_completed"):
+            saved = []
+            before = summary["succeeded"] + summary["failed"] + summary["filtered"]
+            try:
+                self._stream_detail_targets(info_list, fid, summary, saved)
+            except Exception as exc:
+                handled = summary["succeeded"] + summary["failed"] + summary["filtered"] - before
+                _add_run_failure(summary, "save", max(1, len(info_list) - handled), exc)
+                self.log.error(f"详情流水线未完成: fid={fid} confirmed_saved={len(saved)} error_type={type(exc).__name__}")
+            return saved
+        summary["requested"] += len(info_list)
+        try:
+            records, failures = self._get_thread_details_batch_result(info_list)
+        except Exception as exc:
+            _add_run_failure(summary, "detail", len(info_list), exc)
+            self._record_processing_failures(info_list, "parse", exc)
+            return []
+        _add_run_failure(summary, "detail", failures, "详情请求、解析或校验失败，见失败台账")
+        summary["filtered"] += max(0, len(info_list) - len(records) - failures)
+        if not records:
+            return []
+        progress = {}
+        try:
+            result = self.data_manager.filter_and_save_data(
+                records, fid, strict=True, dry_run=self.dry_run, stats=progress)
+        except Exception as exc:
+            saved = progress.get("saved", 0)
+            completed = progress.get("saved_records", [])
+            summary["saved"] += saved
+            summary["succeeded"] += saved + progress.get("existing", 0)
+            summary["existing"] += progress.get("existing", 0)
+            failed_count = max(0, progress.get("candidates", len(records)) - saved - progress.get("confirmed_existing", 0))
+            _add_run_failure(summary, "save", failed_count, exc)
+            by_tid = {str(info["tid"]): info for info in info_list}
+            saved_keys = {str(row["tid"]) for row in progress.get("completed_records", completed)}
+            pending = [row for row in progress.get("candidate_records", records) if str(row["tid"]) not in saved_keys]
+            self._record_processing_failures([by_tid[str(row["tid"])] for row in pending], "save", exc)
+            if completed and not self.dry_run:
+                self._clear_detail_failures(completed)
+            self.log.error(f"板块 {fid} 保存失败: confirmed_saved={saved} failed={failed_count} error={exc}")
+            return completed
+        summary["saved"] += progress["saved"]
+        summary["existing"] += progress["existing"]
+        summary["succeeded"] += len(records)
+        if not self.dry_run:
+            self._clear_detail_failures(records)
+        return result
+
+    def _record_processing_failures(self, infos, stage, exc):
+        if self.dry_run or not infos:
+            return
+        try:
+            self.failure_store.record([
+                self._detail_failure(info, f"https://{domain}/forum.php?mod=viewthread&tid={info['tid']}",
+                                     stage, type(exc).__name__.lower(), str(exc))
+                for info in infos
+            ])
+        except Exception as ledger_error:
+            self.log.error(f"Sehuatang 失败台账写入失败: {ledger_error}")
+
+    async def backfill_forum_section(
+        self,
+        fid: int,
+        year: int,
+        resume: bool = False,
+    ) -> Dict[str, int]:
+        """按年份定位板块页码，并分批补抓历史主题。"""
+        target_year = str(year)
+        self.target_date = target_year
+        if not isinstance(self.http, BackfillHttpClient) and hasattr(type(self.http), "fetch"):
+            self.http = BackfillHttpClient(self.http)
+        self.data_processor.target_date = target_year
+
+        page_range = self._locate_year_page_range(fid, year)
+        if not page_range:
+            self.log.info(f"板块 {fid} 没有定位到 {year} 年的数据页")
+            return {
+                "page_start": 0,
+                "page_end": 0,
+                "pages_scanned": 0,
+                "threads_found": 0,
+                "details_requested": 0,
+                "detail_failures": 0,
+                "records_saved": 0,
+            }
+
+        start_page, end_page = page_range
+        located_start_page = start_page
+        self.log.info(
+            f"板块 {fid} 的 {year} 年数据位于第 {start_page}-{end_page} 页"
+        )
+        if resume:
+            completed_page = self._load_backfill_checkpoint(year, fid)
+            start_page = max(start_page, completed_page + 1)
+            if completed_page:
+                self.log.info(
+                    f"板块 {fid} 从检查点第 {completed_page + 1} 页继续"
+                )
+
+        summary = {
+            "page_start": located_start_page,
+            "page_end": end_page,
+            "pages_scanned": 0,
+            "threads_found": 0,
+            "details_requested": 0,
+            "detail_failures": 0,
+            "records_saved": 0,
+        }
+        if start_page > end_page:
+            self.log.info(f"板块 {fid} 的 {year} 年历史补抓已完成，无需继续")
+            return summary
+
+        batch_size = max(1, self.workers)
+        checkpoint_enabled = not self.dry_run
+
+        for batch_start in range(start_page, end_page + 1, batch_size):
+            pages = list(
+                range(batch_start, min(batch_start + batch_size, end_page + 1))
+            )
+            info_list, tid_list = self._get_plate_info_pages(
+                fid,
+                pages,
+                target_year,
+                ordered_by_dateline=True,
+                fail_on_missing=True,
+            )
+            summary["pages_scanned"] += len(pages)
+            summary["threads_found"] += len(tid_list)
 
             if not tid_list:
-                self.log.info(f"板块 {fid} 没有找到符合条件的帖子")
-                return "没有新的数据"
+                if checkpoint_enabled:
+                    self._save_backfill_checkpoint(year, fid, pages[-1])
+                continue
 
-            self.log.info(f"即将开始爬取的页面: {' '.join(tid_list)}")
-
-            # 第二阶段：过滤已存在的数据
             new_tid_list, new_info_list = self.data_manager.compare_existing_data(
-                tid_list, fid, plate_info_list
+                tid_list,
+                fid,
+                info_list,
+            )
+            summary["details_requested"] += len(new_tid_list)
+            if not new_info_list:
+                if checkpoint_enabled:
+                    self._save_backfill_checkpoint(year, fid, pages[-1])
+                continue
+
+            saved_data, failure_count = self._save_backfill_details(new_info_list, fid)
+            summary["detail_failures"] += failure_count
+            summary["records_saved"] += len(saved_data)
+            if failure_count:
+                checkpoint_enabled = False
+            if checkpoint_enabled:
+                self._save_backfill_checkpoint(year, fid, pages[-1])
+            self.log.info(f"板块 {fid} 历史补抓进度: 第 {pages[0]}-{pages[-1]} 页，新增 {len(saved_data)} 条")
+
+        if summary["detail_failures"]:
+            raise RuntimeError(
+                f"板块 {fid} 有 {summary['detail_failures']} 个详情页抓取失败，"
+                "成功数据已保存，请使用 --resume 重试"
             )
 
-            if not new_tid_list:
-                self.log.info(f"板块 {fid} 没有新数据需要爬取")
-                return "没有新的数据"
+        return summary
 
-            self.log.info(f"需要爬取的页面: {' '.join(new_tid_list)}")
+    async def backfill_pages(
+        self,
+        fid: int,
+        start_page: int,
+        end_page: int,
+        resume: bool = False,
+        checkpoint_store=None,
+    ) -> Dict[str, Any]:
+        """按页区间补抓板块历史数据（不做日期过滤）。
 
-            # 第三阶段：获取帖子详细信息
-            detailed_data_list = await self._get_thread_details_batch(new_info_list)
-
-            if not detailed_data_list:
-                self.log.info(f"板块 {fid} 没有获取到有效的详细数据")
-                return "没有新的数据"
-
-            self.log.info(f"本次抓取的数据条数为: {len(detailed_data_list)}")
-
-            # 第四阶段：保存数据
-            self.log.info("开始写入数据库")
-            filtered_data = self.data_manager.filter_and_save_data(
-                detailed_data_list, fid)
-
-            # 第五阶段：发送通知
-            return self.notification_manager.send_notifications(filtered_data, fid)
-
-        except Exception as e:
-            self.log.error(f"爬取板块 {fid} 时出错: {e}")
-            return f"爬取失败: {str(e)}"
-
-    async def _get_plate_info_batch(self, fid: int) -> tuple[List[Dict[str, Any]], List[str]]:
+        列表按发帖时间倒序翻页，跳过已入库的 tid；详情失败写入
+        失败台账由 retry-failed 恢复，不阻塞页检查点推进。
         """
-        批量获取板块页面信息
+        if not isinstance(self.http, BackfillHttpClient) and hasattr(type(self.http), "fetch"):
+            self.http = BackfillHttpClient(self.http)
+        from scrapers.page_backfill import build_checkpoint_store
 
-        Args:
-            fid: 板块ID
+        self.data_processor.date_filter = False
+        checkpoints = checkpoint_store or build_checkpoint_store(
+            "sehuatang", start_page, end_page, domain, "dateline")
+        partition = str(fid)
 
-        Returns:
-            tuple: (帖子信息列表, 帖子ID列表)
-        """
-        start_time = time.time()
+        first_page = start_page
+        if resume:
+            completed = checkpoints.load("sehuatang", partition)
+            if completed:
+                first_page = max(start_page, completed + 1)
+                self.log.info(f"板块 {fid} 从检查点第 {first_page} 页继续")
 
-        if self.enable_multi_tab:
-            # 使用多标签页批量获取
-            urls = [
-                f"https://{domain}/forum-{fid}-{page}.html" for page in range(1, page_num + 1)]
-            html_responses = self.browser.get_multiple_pages_html(urls)
+        summary = {
+            "source": "sehuatang",
+            "fid": fid,
+            "start_page": start_page,
+            "end_page": end_page,
+            "pages_scanned": 0,
+            "discovered": 0,
+            "requested": 0,
+            "saved": 0,
+            "failed": 0,
+            "stopped": "",
+            "last_page": None,
+        }
 
-            # 解析所有页面
-            all_info_list = []
-            all_tid_list = []
+        seen_pages = {}
 
-            for page, html_response in enumerate(html_responses, 1):
-                if html_response:
-                    try:
-                        info_list, tid_list = self.page_parser.parse_plate_page(
-                            html_response, date())
-                        all_info_list.extend(info_list)
-                        all_tid_list.extend(tid_list)
-                        self.log.info(
-                            f"成功解析板块 {fid} 第 {page} 页，获得 {len(info_list)} 个帖子")
-                    except Exception as e:
-                        self.log.error(f"解析板块 {fid} 第 {page} 页时出错: {e}")
+        def read_page(page):
+            body = self.http.get_html(self._build_plate_url(fid, page, ordered_by_dateline=True))
+            if not body:
+                raise ValueError("列表请求失败或验证未通过")
+            return self.page_parser.parse_backfill_page(body)
+
+        def stop_failed(page, reason):
+            summary["stopped"] = f"list_failed@{page}"
+            summary["failed"] += 1
+            summary["error"] = reason
+            self.log.warning(f"板块补抓列表异常，暂停（检查点未推进，可 --resume 继续）: "
+                             f"fid={fid} page={page} reason={reason}")
+
+        # 续跑/指定深分页时先读取第一页，避免旧检查点已越过真实末页而持续空转。
+        if 1 < first_page <= end_page:
+            try:
+                first_records, pagination = read_page(1)
+                if pagination.current_page not in (None, 1):
+                    raise ValueError(f"第一页响应页码错位: actual={pagination.current_page}")
+                summary["last_page"] = pagination.last_page
+                if first_records:
+                    seen_pages[frozenset(str(row["tid"]) for row in first_records)] = 1
+                elif pagination.last_page is None or pagination.last_page == 1:
+                    summary["stopped"] = "exhausted@1"
                 else:
-                    self.log.warning(f"获取板块 {fid} 第 {page} 页内容失败")
-        else:
-            # 使用原有的异步方式
-            tasks = [
-                self._get_plate_info(fid, page)
-                for page in range(1, page_num + 1)
-            ]
+                    raise ValueError("第一页为空，但分页栏显示还有后续页")
+            except Exception as exc:
+                stop_failed(1, str(exc))
 
-            # 执行异步任务
-            results = await asyncio.gather(*tasks)
+        for page in range(first_page, end_page + 1):
+            if summary["stopped"]:
+                break
+            if summary["last_page"] is not None and page > summary["last_page"]:
+                summary["stopped"] = f"last_page@{summary['last_page']}"
+                self.log.info(f"板块 {fid} 已达实际末页 {summary['last_page']}，不再请求第 {page} 页")
+                break
+            try:
+                info_list, pagination = read_page(page)
+            except Exception as exc:
+                stop_failed(page, str(exc))
+                break
+            if pagination.last_page is not None:
+                summary["last_page"] = pagination.last_page
+            if summary["last_page"] is not None and page > summary["last_page"]:
+                summary["stopped"] = f"last_page@{summary['last_page']}"
+                self.log.info(f"板块 {fid} 请求页 {page} 已越界，实际末页 {summary['last_page']}")
+                break
+            if pagination.current_page not in (None, page):
+                stop_failed(page, f"响应页码错位: requested={page} actual={pagination.current_page}")
+                break
+            if not info_list:
+                if summary["last_page"] is not None and page < summary["last_page"]:
+                    stop_failed(page, f"末页前出现空列表: last_page={summary['last_page']}")
+                    break
+                summary["stopped"] = f"exhausted@{page}"
+                self.log.info(f"板块 {fid} 第 {page} 页无主题，视为到底")
+                break
 
-            # 合并结果
-            all_info_list = []
-            all_tid_list = []
+            signature = frozenset(str(info["tid"]) for info in info_list)
+            if signature in seen_pages:
+                stop_failed(page, f"整页主题重复: previous_page={seen_pages[signature]}")
+                break
+            seen_pages[signature] = page
+            for info in info_list:
+                info["fid"] = fid
+            tid_list = [str(info["tid"]) for info in info_list]
+            summary["pages_scanned"] += 1
+            summary["discovered"] += len(tid_list)
 
-            for info_list, tid_list in results:
-                all_info_list.extend(info_list)
-                all_tid_list.extend(tid_list)
+            new_tid_list, new_info_list = self.data_manager.compare_existing_data(
+                tid_list,
+                fid,
+                info_list,
+            )
+            summary["requested"] += len(new_tid_list)
 
-        end_time = time.time()
+            if new_info_list:
+                saved_data, failure_count = self._save_backfill_details(new_info_list, fid)
+                summary["failed"] += failure_count
+                summary["saved"] += len(saved_data)
+
+            if not self.dry_run:
+                checkpoints.save("sehuatang", partition, page)
+            self.log.info(
+                f"本页处理完成: source=sehuatang partition={fid} page={page}，"
+                f"发现 {len(tid_list)} 条，新增请求 {len(new_tid_list)} 条"
+            )
+            if summary["last_page"] is not None and page >= summary["last_page"]:
+                summary["stopped"] = f"last_page@{summary['last_page']}"
+                self.log.info(f"板块 {fid} 实际末页 {page} 已处理完成，切换下一分区")
+                break
+
         self.log.info(
-            f"get_plate_info 执行时间: {end_time - start_time:.2f}秒，模式: {'多标签页' if self.enable_multi_tab else '异步'}")
+            "板块分页补抓结束: "
+            f"fid={fid} pages={summary['pages_scanned']} "
+            f"discovered={summary['discovered']} requested={summary['requested']} "
+            f"saved={summary['saved']} failed={summary['failed']}"
+        )
+        return summary
 
-        return all_info_list, all_tid_list
+    @staticmethod
+    def _checkpoint_path() -> Path:
+        return Path(__file__).resolve().parent.parent / "data" / "backfill_progress.json"
 
-    async def _get_plate_info(self, fid: int, page: int) -> tuple[List[Dict[str, Any]], List[str]]:
-        """
-        获取单个板块页面信息
-        
-        Args:
-            fid: 板块ID
-            page: 页码
-            
-        Returns:
-            tuple: (帖子信息列表, 帖子ID列表)
-        """
-        self.log.info(f"爬取板块 {fid} 第 {page} 页")
+    def _load_backfill_checkpoint(self, year: int, fid: int) -> int:
+        from scrapers.page_backfill import PageCheckpointStore
+        return PageCheckpointStore(self._checkpoint_path()).load(str(year), fid)
 
-        url = f"https://{domain}/forum-{fid}-{page}.html"
-
-        try:
-            html_response = self.browser.get_page_html(url)
-            if not html_response:
-                self.log.warning(f"获取页面内容失败: {url}")
-                return [], []
-
-            return self.page_parser.parse_plate_page(html_response, date())
-
-        except Exception as e:
-            self.log.error(f"获取板块页面信息时出错: {e}")
-            return [], []
-
-    async def _get_thread_details_batch(self, info_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        批量获取帖子详细信息
-
-        Args:
-            info_list: 帖子基本信息列表
-
-        Returns:
-            详细信息列表
-        """
-        start_time = time.time()
-
-        if self.enable_multi_tab:
-            # 使用多标签页批量获取
-            urls = [
-                f"https://{domain}/?mod=viewthread&tid={info['tid']}" for info in info_list]
-            html_responses = self.browser.get_multiple_pages_html(urls)
-
-            # 解析所有页面
-            results = []
-            for i, html_response in enumerate(html_responses):
-                if html_response:
-                    try:
-                        detailed_data = self.page_parser.parse_thread_page(
-                            html_response)
-                        if detailed_data:
-                            results.append((detailed_data, info_list[i]))
-                            self.log.debug(f"成功解析帖子 {info_list[i]['tid']}")
-                        else:
-                            results.append(None)
-                            self.log.warning(
-                                f"解析帖子页面失败: {info_list[i]['tid']}")
-                    except Exception as e:
-                        self.log.error(f"解析帖子 {info_list[i]['tid']} 时出错: {e}")
-                        results.append(None)
-                else:
-                    self.log.warning(f"获取帖子页面内容失败: {info_list[i]['tid']}")
-                    results.append(None)
-        else:
-            # 使用原有的异步方式
-            tasks = [
-                self._get_thread_detail(info["tid"], info)
-                for info in info_list
-            ]
-
-            # 执行异步任务
-            results = await asyncio.gather(*tasks)
-
-        end_time = time.time()
-        self.log.info(
-            f"get_thread_details 执行时间: {end_time - start_time:.2f}秒，模式: {'多标签页' if self.enable_multi_tab else '异步'}")
-
-        # 处理结果
-        detailed_data = self.data_processor.merge_thread_data(
-            results, info_list)
-        cleaned_data = self.data_processor.clean_data(detailed_data)
-
-        return cleaned_data
-
-    async def _get_thread_detail(self, tid: str, thread_info: Dict[str, Any]) -> Optional[tuple]:
-        """
-        获取单个帖子的详细信息
-
-        Args:
-            tid: 帖子ID
-            thread_info: 帖子基本信息
-
-        Returns:
-            tuple: (详细信息, 基本信息) 或 None
-        """
-        url = f"https://{domain}/?mod=viewthread&tid={tid}"
-
-        try:
-            html_response = self.browser.get_page_html(url)
-            if not html_response:
-                self.log.warning(f"获取帖子页面内容失败: {url}")
-                return None
-
-            detailed_data = self.page_parser.parse_thread_page(html_response)
-            if detailed_data:
-                self.log.debug(f"成功爬取帖子 {tid}")
-                return detailed_data, thread_info
-            else:
-                self.log.warning(f"解析帖子页面失败: {tid}")
-                return None
-
-        except Exception as e:
-            self.log.error(f"获取帖子 {tid} 详细信息时出错: {e}")
-            return None
+    def _save_backfill_checkpoint(self, year: int, fid: int, page: int) -> None:
+        from scrapers.page_backfill import PageCheckpointStore
+        PageCheckpointStore(self._checkpoint_path()).save(str(year), fid, page)
 
     def initialize_homepage(self) -> bool:
-        """
-        初始化主页，进行必要的登录或验证
+        """HTTP 模式无需浏览器预热，保留接口兼容 main.py。"""
+        return True
 
-        Returns:
-            是否成功初始化
-        """
-        try:
-            self.log.info(f"开始初始化主页: {domain}")
+    # ---------- 内部 ----------
 
-            # 尝试多次获取主页内容
-            max_attempts = 3
-            for attempt in range(1, max_attempts + 1):
-                self.log.info(f"第 {attempt}/{max_attempts} 次尝试获取主页内容")
+    def _get_plate_info_batch(self, fid: int, summary=None) -> Tuple[List[Dict[str, Any]], List[str]]:
+        pages = list(range(1, page_num + 1))
+        return self._get_plate_info_pages(
+            fid,
+            pages,
+            self.target_date or date(),
+            ordered_by_dateline=False,
+            summary=summary,
+        )
 
-                try:
-                    html_response = self.browser.get_page_html(
-                        f"https://{domain}")
+    def _get_plate_info_pages(
+        self,
+        fid: int,
+        pages: List[int],
+        target_date: str,
+        ordered_by_dateline: bool,
+        fail_on_missing: bool = False,
+        summary=None,
+    ) -> Tuple[List[Dict[str, Any]], List[str]]:
+        t0 = time.time()
+        urls = [
+            self._build_plate_url(fid, page, ordered_by_dateline)
+            for page in pages
+        ]
+        self.log.info(f"正在批量请求 {len(urls)} 个板块页面（来源并发上限 {self.workers}）...")
+        if summary is not None:
+            summary["list_requested"] += len(urls)
+        responses = self._fetch_many(urls)
 
-                    # 详细记录响应信息
-                    if html_response:
-                        html_length = len(html_response)
-                        self.log.info(f"获取到HTML内容，长度: {html_length} 字符")
+        all_info: List[Dict[str, Any]] = []
+        all_tids: List[str] = []
 
-                        # 记录HTML内容的前500个字符用于调试
-                        preview = html_response[:500] if len(
-                            html_response) > 500 else html_response
-                        self.log.debug(f"HTML内容预览: {preview}")
+        for page, body in zip(pages, responses):
+            if not body:
+                self.log.warning(f"获取板块 {fid} 第 {page} 页内容失败")
+                if summary is not None:
+                    _add_run_failure(summary, "list", 1, f"板块 {fid} 第 {page} 页请求失败")
+                if fail_on_missing:
+                    raise RuntimeError(f"获取板块 {fid} 第 {page} 页内容失败")
+                continue
+            try:
+                if summary is not None:
+                    info_list, tid_list = self.page_parser.parse_plate_page(body, target_date, strict=True)
+                else:
+                    info_list, tid_list = self.page_parser.parse_plate_page(body, target_date)
+                for info in info_list:
+                    info["fid"] = fid
+                all_info.extend(info_list)
+                all_tids.extend(tid_list)
+                if summary is not None:
+                    summary["list_succeeded"] += 1
+                self.log.info(f"成功解析板块 {fid} 第 {page} 页，获得 {len(info_list)} 个帖子")
+            except Exception as e:
+                self.log.error(f"解析板块 {fid} 第 {page} 页时出错: {e}")
+                if summary is not None:
+                    _add_run_failure(summary, "list", 1, f"板块 {fid} 第 {page} 页解析失败: {e}")
 
-                        # 检查页面内容是否有效
-                        if self._validate_homepage_content(html_response):
-                            self.log.info("主页初始化成功")
-                            return True
-                        else:
-                            self.log.warning(f"第 {attempt} 次尝试：主页内容验证失败")
-                            if attempt < max_attempts:
-                                self.log.info("等待3秒后重试...")
-                                time.sleep(3)
-                                continue
-                    else:
-                        self.log.warning(f"第 {attempt} 次尝试：获取到空的HTML内容")
-                        if attempt < max_attempts:
-                            self.log.info("等待3秒后重试...")
-                            time.sleep(3)
-                            continue
+        self.log.info(f"批量获取板块列表页耗时: {time.time() - t0:.2f}秒")
+        return all_info, all_tids
 
-                except Exception as e:
-                    self.log.error(f"第 {attempt} 次尝试获取主页时出错: {e}")
-                    if attempt < max_attempts:
-                        self.log.info("等待3秒后重试...")
-                        time.sleep(3)
-                        continue
+    def _locate_year_page_range(
+        self,
+        fid: int,
+        year: int,
+    ) -> Optional[Tuple[int, int]]:
+        """在按发帖时间倒序的列表中二分定位年份页码范围。"""
+        cache: Dict[int, Dict[str, Any]] = {}
 
-            self.log.error(f"经过 {max_attempts} 次尝试，仍无法成功初始化主页")
-            return False
+        def metadata(page: int) -> Dict[str, Any]:
+            if page not in cache:
+                cache[page] = self._get_ordered_page_metadata(fid, page)
+            return cache[page]
 
-        except Exception as e:
-            self.log.error(f"初始化主页时发生未预期的错误: {e}")
-            return False
+        first_page_meta = metadata(1)
+        last_page = first_page_meta["last_page"]
+        target_start = calendar_date(year, 1, 1)
+        target_end = calendar_date(year, 12, 31)
 
-    def _validate_homepage_content(self, html_content: str) -> bool:
-        """
-        验证主页内容是否有效
-
-        Args:
-            html_content: HTML内容
-
-        Returns:
-            是否有效
-        """
-        try:
-            if not html_content or len(html_content.strip()) < 100:
-                self.log.warning("HTML内容过短，可能无效")
-                return False
-
-            # 转换为小写进行检查
-            html_lower = html_content.lower()
-            domain_lower = domain.lower()
-
-            # 检查多个验证条件
-            validation_checks = [
-                domain_lower in html_lower,
-                "forum" in html_lower,
-                "<html" in html_lower,
-                "<body" in html_lower,
-                "sehuatang" in html_lower
-            ]
-
-            passed_checks = sum(validation_checks)
-            self.log.debug(f"内容验证结果: {passed_checks}/5 项检查通过")
-
-            # 至少需要通过2项检查
-            if passed_checks >= 2:
-                self.log.info("主页内容验证通过")
-                return True
+        left, right = 1, last_page
+        first_candidate = None
+        while left <= right:
+            middle = (left + right) // 2
+            page_meta = metadata(middle)
+            if page_meta["oldest_date"] <= target_end:
+                first_candidate = middle
+                right = middle - 1
             else:
-                self.log.warning(f"主页内容验证失败，仅通过 {passed_checks}/5 项检查")
-                # 记录更多调试信息
-                self.log.debug(f"检查结果详情:")
-                self.log.debug(
-                    f"- 包含域名 '{domain_lower}': {domain_lower in html_lower}")
-                self.log.debug(f"- 包含 'forum': {'forum' in html_lower}")
-                self.log.debug(f"- 包含 '<html': {'<html' in html_lower}")
-                self.log.debug(f"- 包含 '<body': {'<body' in html_lower}")
-                self.log.debug(
-                    f"- 包含 'sehuatang': {'sehuatang' in html_lower}")
-                return False
+                left = middle + 1
 
+        if first_candidate is None:
+            return None
+
+        left, right = first_candidate, last_page
+        last_candidate = None
+        while left <= right:
+            middle = (left + right) // 2
+            page_meta = metadata(middle)
+            if page_meta["newest_date"] >= target_start:
+                last_candidate = middle
+                left = middle + 1
+            else:
+                right = middle - 1
+
+        if last_candidate is None or first_candidate > last_candidate:
+            return None
+
+        # 同一天可能跨页，边界各扩一页后再按年份精确过滤。
+        return (
+            max(1, first_candidate - 1),
+            min(last_page, last_candidate + 1),
+        )
+
+    def _get_ordered_page_metadata(self, fid: int, page: int) -> Dict[str, Any]:
+        url = self._build_plate_url(fid, page, ordered_by_dateline=True)
+        body = self.http.get_html(url)
+        if not body:
+            raise RuntimeError(f"获取板块 {fid} 第 {page} 页元数据失败")
+
+        info_list = self.page_parser.parse_plate_page_all(body)
+        parsed_dates = [
+            parsed_date
+            for item in info_list
+            if (parsed_date := self._parse_plate_date(item.get("date")))
+        ]
+        if not parsed_dates:
+            if page == 1:
+                parsed_dates = [calendar_date.today()]
+            else:
+                raise RuntimeError(
+                    f"板块 {fid} 第 {page} 页没有可用于定位的主题日期"
+                )
+
+        page_meta = {
+            "newest_date": max(parsed_dates),
+            "oldest_date": min(parsed_dates),
+            "last_page": self.page_parser.parse_last_page(body),
+        }
+        self.log.info(
+            f"定位板块 {fid} 第 {page} 页: "
+            f"{page_meta['oldest_date']} - {page_meta['newest_date']}"
+        )
+        return page_meta
+
+    @staticmethod
+    def _parse_plate_date(value: Any) -> Optional[calendar_date]:
+        if not value:
+            return None
+        try:
+            return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _build_plate_url(
+        fid: int,
+        page: int,
+        ordered_by_dateline: bool,
+    ) -> str:
+        if not ordered_by_dateline:
+            return f"https://{domain}/forum-{fid}-{page}.html"
+
+        query = urlencode({
+            "mod": "forumdisplay",
+            "fid": fid,
+            "filter": "author",
+            "orderby": "dateline",
+            "page": page,
+        })
+        return f"https://{domain}/forum.php?{query}"
+
+    def _stream_detail_targets(self, infos, fid, summary, saved):
+        infos = list({str(row["tid"]): row for row in infos}.values())
+        settings = getattr(self, "storage_settings", None) or StorageSettings()
+        summary["requested"] += len(infos)
+        urls = [f"https://{domain}/forum.php?mod=viewthread&tid={info['tid']}" for info in infos]
+
+        def persist(items):
+            rows = [item.record for item in items if item.record is not None]
+            failures = [item.failure for item in items if item.failure is not None]
+            if rows:
+                progress = {}
+                try:
+                    inserted = retry_resource_write(lambda: self.data_manager.filter_and_save_data(
+                        rows, fid, strict=True, stats=progress), settings, self.log)
+                except Exception:
+                    confirmed = progress.get("saved_records", [])
+                    saved.extend(confirmed)
+                    summary["saved"] += progress.get("saved", 0)
+                    summary["existing"] += progress.get("existing", 0)
+                    summary["succeeded"] += len(confirmed) + progress.get("existing", 0)
+                    raise
+                saved.extend(inserted)
+                summary["saved"] += progress.get("saved", len(inserted))
+                summary["existing"] += progress.get("existing", 0)
+                summary["succeeded"] += len(rows)
+            if failures:
+                self.failure_store.record(failures)
+            if rows:
+                self._clear_detail_failures(rows)
+
+        with BatchWriter("sehuatang", persist, settings=settings, context=f"partition={fid}") as writer:
+            for index, result in completed_results(self.http, urls, writer.failed):
+                writer.check()
+                if result.error_type == "rate_limited":
+                    _add_run_failure(summary, "detail", 1, "端口限流，等待后续恢复")
+                    continue
+                failures = []
+                rows, count = self._get_thread_details_batch_result(
+                    [infos[index]], responses=[result.body if result.ok else None], failures_out=failures)
+                _add_run_failure(summary, "detail", count, "详情请求、解析或校验失败")
+                summary["filtered"] += max(0, 1 - len(rows) - count)
+                if self.dry_run:
+                    summary["succeeded"] += len(rows)
+                    continue
+                for row in rows:
+                    writer.submit(PendingWrite(str(row["tid"]), record=row))
+                for failure in failures:
+                    writer.submit(PendingWrite(failure.key, failure=failure))
+        summary["write_batches"] = summary.get("write_batches", 0) + writer.batches
+        summary["persist_ms"] = summary.get("persist_ms", 0) + writer.persist_ms
+        summary["write_queue_wait_ms"] = summary.get("write_queue_wait_ms", 0) + writer.queue_wait_ms
+
+    def _save_backfill_details(self, infos, fid):
+        infos = list({str(row["tid"]): row for row in infos}.values())
+        if hasattr(type(self.http), "iter_completed"):
+            summary = _new_run_stats(self.dry_run)
+            saved = []
+            self._stream_detail_targets(infos, fid, summary, saved)
+            return saved, summary["failed"]
+        saved, failed = [], 0
+        def persist(rows):
+            if rows:
+                saved.extend(self.data_manager.filter_and_save_data(
+                    rows, fid, strict=True, dry_run=self.dry_run))
+                if not self.dry_run:
+                    self._clear_detail_failures(rows)
+        if isinstance(self.http, BackfillHttpClient):
+            urls = [f"https://{domain}/forum.php?mod=viewthread&tid={info['tid']}" for info in infos]
+            for index, result in self.http.iter_completed(urls):
+                rows, count = self._get_thread_details_batch_result(
+                    [infos[index]], responses=[result.body if result.ok else None])
+                failed += count
+                persist(rows)
+        else:
+            rows, failed = self._get_thread_details_batch_result(infos)
+            persist(rows)
+        return saved, failed
+
+    def _get_thread_details_batch(self, info_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        detailed_data, _ = self._get_thread_details_batch_result(info_list)
+        return detailed_data
+
+    def _get_thread_details_batch_result(
+        self,
+        info_list: List[Dict[str, Any]],
+        responses=None,
+        failures_out=None,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        t0 = time.time()
+        urls = [f"https://{domain}/forum.php?mod=viewthread&tid={info['tid']}" for info in info_list]
+        if responses is None:
+            self.log.info(f"正在批量请求 {len(urls)} 个帖子详情页（来源并发上限 {self.workers}）...")
+        rate_urls = set()
+        if responses is None:
+            info_list = list({str(row["tid"]): row for row in info_list}.values())
+            urls = [f"https://{domain}/forum.php?mod=viewthread&tid={info['tid']}" for info in info_list]
+            responses = self._fetch_many(urls)
+            rate_urls = getattr(self, "_last_rate_limited_urls", set())
+
+        results: List[Optional[tuple]] = []
+        failures = []
+        for i, body in enumerate(responses):
+            tid = info_list[i]["tid"]
+            if urls[i] in rate_urls:
+                results.append(None)
+                continue
+            if not body:
+                self.log.warning(f"获取帖子页面内容失败: {tid}")
+                results.append(None)
+                failures.append(
+                    self._detail_failure(
+                        info_list[i],
+                        urls[i],
+                        "fetch",
+                        "request_failed",
+                    )
+                )
+                continue
+            try:
+                detail = self.page_parser.parse_thread_page(body)
+                if detail:
+                    results.append((detail, info_list[i]))
+                    self.log.debug(f"成功解析帖子 {tid}")
+                else:
+                    results.append(None)
+                    self.log.warning(f"解析帖子页面失败: {tid}")
+                    failures.append(
+                        self._detail_failure(
+                            info_list[i],
+                            urls[i],
+                            "parse",
+                            "invalid_document",
+                        )
+                    )
+            except Exception as e:
+                self.log.error(f"解析帖子 {tid} 时出错: {e}")
+                results.append(None)
+                failures.append(
+                    self._detail_failure(
+                        info_list[i],
+                        urls[i],
+                        "parse",
+                        type(e).__name__.lower(),
+                        str(e),
+                    )
+                )
+
+        self.log.debug(f"详情解析耗时: {time.time() - t0:.2f}秒")
+
+        merged = self.data_processor.merge_thread_data(results, info_list)
+        cleaned_data = self.data_processor.clean_data(merged)
+        cleaned_tids = {str(item.get("tid")) for item in cleaned_data}
+        merged_by_tid = {str(item.get("tid")): item for item in merged}
+        for result in results:
+            if result is None:
+                continue
+            _, basic_info = result
+            if str(basic_info.get("tid")) in cleaned_tids:
+                continue
+            tid = str(basic_info["tid"])
+            # 日期不符是正常筛选，不应写入失败台账。
+            if tid not in merged_by_tid:
+                continue
+            missing = [key for key in ("tid", "post_time", "magnet")
+                       if not merged_by_tid[tid].get(key)]
+            failures.append(
+                self._detail_failure(
+                    basic_info,
+                    f"https://{domain}/forum.php?mod=viewthread&tid={tid}",
+                    "validate",
+                    "invalid_record",
+                    "缺少必要字段: " + ", ".join(missing),
+                )
+            )
+
+        if failures_out is not None:
+            failures_out.extend(failures)
+        elif failures and not self.dry_run:
+            try:
+                self.failure_store.record(failures)
+            except Exception as e:
+                self.log.error(f"Sehuatang 失败台账写入失败: {e}")
+                raise
+
+        failure_count = len(failures) + len(rate_urls)
+        return cleaned_data, failure_count
+
+    def retry_failed_details(self) -> Dict[str, Any]:
+        started = time.monotonic()
+        summary = _new_run_stats(self.dry_run)
+        self.data_processor.date_filter = False
+        try:
+            targets = self.failure_store.due_targets("sehuatang")
+        except Exception as exc:
+            _add_run_failure(summary, "select", 1, exc)
+            return _finish_run_stats(summary, started)
+        summary["discovered"] = len(targets)
+        grouped = {}
+        for target in targets:
+            metadata = dict(target.metadata)
+            try:
+                fid = int(metadata.get("fid") or target.partition or 0)
+                if not fid or not metadata.get("tid"):
+                    raise ValueError(f"失败目标缺少有效 fid/tid: {target.key}")
+            except (TypeError, ValueError) as exc:
+                _add_run_failure(summary, "target", 1, exc)
+                if not self.dry_run:
+                    try:
+                        self.failure_store.record([CrawlFailure(
+                            source="sehuatang", key=target.key, url=target.url, stage="validate",
+                            attempts=1, error_type="invalid_target_metadata", error_message=str(exc),
+                            metadata=metadata,
+                        )])
+                    except Exception as ledger_error:
+                        self.log.error(f"Sehuatang 失败台账写入失败: {ledger_error}")
+                continue
+            grouped.setdefault(fid, []).append(metadata)
+        for fid, info_list in grouped.items():
+            self._process_detail_targets(info_list, fid, summary)
+        return _finish_run_stats(summary, started)
+
+    def _detail_failure(
+        self,
+        info: Dict[str, Any],
+        url: str,
+        stage: str,
+        error_type: str,
+        error_message: str = "",
+    ) -> CrawlFailure:
+        return CrawlFailure(
+            source="sehuatang",
+            key=str(info["tid"]),
+            url=url,
+            stage=stage,
+            attempts=self.http.settings.retry.attempts,
+            error_type=error_type,
+            error_message=error_message,
+            metadata=dict(info),
+        )
+
+    def _clear_detail_failures(self, data_list: List[Dict[str, Any]]) -> None:
+        keys = [str(item["tid"]) for item in data_list if item.get("tid")]
+        if not keys:
+            return
+        try:
+            self.failure_store.clear("sehuatang", keys)
         except Exception as e:
-            self.log.error(f"验证主页内容时出错: {e}")
-            return False
+            self.log.error(f"Sehuatang 失败台账清理失败: {e}")
+
+    def _fetch_many(self, urls: List[str]) -> List[Optional[bytes]]:
+        """按输入顺序返回结果。同一 URL 失败位置为 None。"""
+        if not urls:
+            return []
+        if hasattr(type(self.http), "fetch_many"):
+            fetched = self.http.fetch_many(urls)
+            self._last_rate_limited_urls = {row.url for row in fetched if row.error_type == "rate_limited"}
+            return [result.body if result.ok else None for result in fetched]
+        results: List[Optional[bytes]] = [None] * len(urls)
+        with ThreadPoolExecutor(max_workers=min(self.workers, len(urls))) as pool:
+            futures = {pool.submit(self.http.get_html, u): i for i, u in enumerate(urls)}
+            for fut in as_completed(futures):
+                idx = futures[fut]
+                try:
+                    results[idx] = fut.result()
+                except Exception as e:
+                    self.log.error(f"抓取异常 idx={idx} url={urls[idx]}: {e}")
+                    results[idx] = None
+        return results
+
+    # ---------- 上下文 ----------
 
     def close(self):
-        """关闭爬虫，释放资源"""
-        try:
-            self.browser.close_page()
-            self.log.info("爬虫资源已释放")
-        except Exception as e:
-            self.log.error(f"关闭爬虫时出错: {e}")
+        self.log.info("爬虫资源已释放")
 
     def __enter__(self):
-        """上下文管理器入口"""
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """上下文管理器出口"""
         self.close()
-        # 不抑制异常
         return False

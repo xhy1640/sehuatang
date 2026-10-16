@@ -1,167 +1,183 @@
-# -*- coding: utf-8 -*-
-"""
-优化的日志管理模块
-支持配置文件控制和更灵活的日志设置
-"""
-import os
-import sys
-import time
+"""统一日志配置与兼容日志门面。"""
+
 import logging
-import inspect
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Optional
+from typing import Any, Mapping, Optional
 
-# 获取项目根目录
+
 project_root = Path(__file__).parent.parent
 logs_dir = project_root / "logs"
-
-# 确保日志目录存在
 logs_dir.mkdir(exist_ok=True)
 
-# 默认日志配置
 DEFAULT_LOG_CONFIG = {
     "level": "INFO",
-    "max_file_size": 10 * 1024 * 1024,  # 10MB
+    "max_file_size": 10 * 1024 * 1024,
     "backup_count": 5,
-    "console_output": True
+    "console_output": True,
 }
 
-# 日志文件路径配置
-LOG_FILES = {
-    logging.NOTSET: logs_dir / "notset.log",
-    logging.DEBUG: logs_dir / "debug.log",
-    logging.INFO: logs_dir / "info.log",
-    logging.WARNING: logs_dir / "warning.log",
-    logging.ERROR: logs_dir / "error.log",
-    logging.CRITICAL: logs_dir / "critical.log",
+LOG_MODULES = {
+    "sehuatang": "Sehuatang",
+    "javbee": "JavBee",
+    "x1080x": "x1080x",
+    "telegram": "Telegram",
+    "scheduler": "调度",
+    "database": "数据库与存储",
+    "system": "系统",
+    "unclassified": "未分类（历史日志）",
 }
+
+
+def module_for_logger(caller: str) -> str:
+    """按代码所属组件归类，不根据日志正文关键词猜测模块。"""
+    if caller.startswith("notifications.") or caller in {"util.sendTelegram", "scrapers.notification_manager"}:
+        return "telegram"
+    if caller == "util.mongo" or caller.startswith("scrapers.infrastructure."):
+        return "database"
+    if caller == "util.scheduler_manager":
+        return "scheduler"
+    for source in ("sehuatang", "javbee", "x1080x"):
+        if caller.startswith(f"scrapers.sources.{source}.") or caller in {
+            f"scrapers.{source}_scraper", f"scrapers.{source}_parser",
+        }:
+            return source
+    if caller in {"scrapers.web_scraper", "scrapers.page_parser", "scrapers.http_client",
+                  "scrapers.data_manager", "scrapers.data_processor"}:
+        return "sehuatang"
+    return "system"
 
 
 def get_log_config():
-    """获取日志配置"""
     try:
         from util.read_config import get_config
-        return get_config("logging", DEFAULT_LOG_CONFIG)
+
+        configured = get_config("logging", {}) or {}
+        return {**DEFAULT_LOG_CONFIG, **configured}
     except Exception:
-        return DEFAULT_LOG_CONFIG
+        return dict(DEFAULT_LOG_CONFIG)
 
 
-def create_handlers():
-    """创建日志处理器"""
+def _configure_stdout_utf8() -> None:
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if callable(reconfigure):
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
+def _build_logger() -> logging.Logger:
     config = get_log_config()
-    handlers = {}
+    logger = logging.getLogger("crawler")
+    if getattr(logger, "_crawler_configured", False):
+        return logger
 
-    for level, log_file in LOG_FILES.items():
-        handler = RotatingFileHandler(
-            str(log_file),
-            maxBytes=config.get(
-                "max_file_size", DEFAULT_LOG_CONFIG["max_file_size"]),
-            backupCount=config.get(
-                "backup_count", DEFAULT_LOG_CONFIG["backup_count"]),
-            encoding="utf-8"
+    level_name = str(config.get("level", "INFO")).upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logger.setLevel(level)
+    logger.propagate = False
+    formatter = logging.Formatter(
+        "%(asctime)s - %(levelname)s - [module=%(component)s] %(message)s",
+        defaults={"component": "system"},
+    )
+
+    app_handler = RotatingFileHandler(
+        logs_dir / "crawler.log",
+        maxBytes=int(config["max_file_size"]),
+        backupCount=int(config["backup_count"]),
+        encoding="utf-8",
+    )
+    app_handler.setLevel(level)
+    app_handler.setFormatter(formatter)
+    logger.addHandler(app_handler)
+
+    error_handler = RotatingFileHandler(
+        logs_dir / "error.log",
+        maxBytes=int(config["max_file_size"]),
+        backupCount=int(config["backup_count"]),
+        encoding="utf-8",
+    )
+    error_handler.setLevel(logging.ERROR)
+    error_handler.setFormatter(formatter)
+    logger.addHandler(error_handler)
+
+    if config.get("console_output", True):
+        _configure_stdout_utf8()
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(level)
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+
+    logger._crawler_configured = True
+    return logger
+
+
+class TNLog:
+    """兼容旧调用方式，并支持绑定统一上下文字段。"""
+
+    def __init__(
+        self,
+        level: int = logging.NOTSET,
+        context: Optional[Mapping[str, Any]] = None,
+    ):
+        self._logger = _build_logger()
+        self._context = dict(context or {})
+
+    def bind(self, **context: Any) -> "TNLog":
+        return TNLog(context={**self._context, **context})
+
+    def set_level(self, level: Any) -> None:
+        resolved = (
+            getattr(logging, str(level).upper(), logging.INFO)
+            if isinstance(level, str)
+            else int(level)
         )
-        handlers[level] = handler
+        self._logger.setLevel(resolved)
+        for handler in self._logger.handlers:
+            if not (
+                isinstance(handler, RotatingFileHandler)
+                and Path(handler.baseFilename).name == "error.log"
+            ):
+                handler.setLevel(resolved)
 
-    return handlers
-
-
-def create_console_handler():
-    """创建控制台处理器"""
-    config = get_log_config()
-
-    if not config.get("console_output", True):
-        return None
-
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setLevel(logging.INFO)
-    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-    handler.setFormatter(formatter)
-    return handler
-
-
-# 创建处理器
-handlers = create_handlers()
-console_handler = create_console_handler()
-
-
-class TNLog(object):
-    def printfNow(self):
-        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-
-    def __init__(self, level=logging.NOTSET):
-        self.__loggers = {}
-
-        logLevels = handlers.keys()
-
-        for level in logLevels:
-            logger = logging.getLogger(str(level))
-
-            # 如果不指定level，获得的handler似乎是同一个handler?
-
-            logger.addHandler(handlers[level])
-
-            # 添加标准输出处理器（只给INFO及以上级别的logger添加控制台输出）
-            if level >= logging.INFO and console_handler:
-                logger.addHandler(console_handler)
-
-            logger.setLevel(level)
-
-            # 防止日志重复输出
-            logger.propagate = False
-
-            self.__loggers.update({level: logger})
-
-    def getLogMessage(self, level, message):
-        frame_info = inspect.stack()[2]
-        filename = frame_info.filename
-        lineNo = frame_info.lineno
-        functionName = frame_info.function
-
-        """日志格式：[时间] [类型] [记录代码] 信息"""
-
-        return "[%s] [%s] [%s - %s - %s] %s" % (
-            self.printfNow(),
-            level,
-            filename,
-            lineNo,
-            functionName,
-            message,
+    def _message(self, message: Any) -> str:
+        text = str(message)
+        if not self._context:
+            return text
+        fields = " ".join(
+            f"{key}={value}"
+            for key, value in self._context.items()
+            if value is not None and key != "module"
         )
+        return f"{text} {fields}" if fields else text
 
-    def info(self, message):
-        message = self.getLogMessage("info", message)
+    def _emit(self, level: int, message: Any, *, exc_info=False) -> None:
+        caller = sys._getframe(2).f_globals.get("__name__", "")
+        component = self._context.get("module") or module_for_logger(caller)
+        if component not in LOG_MODULES:
+            component = "system"
+        self._logger.log(level, self._message(message), extra={"component": component},
+                         exc_info=exc_info, stacklevel=3)
 
-        self.__loggers[logging.INFO].info(message)
+    def debug(self, message: Any) -> None:
+        self._emit(logging.DEBUG, message)
 
-    def error(self, message):
-        message = self.getLogMessage("error", message)
+    def info(self, message: Any) -> None:
+        self._emit(logging.INFO, message)
 
-        self.__loggers[logging.ERROR].error(message)
+    def warning(self, message: Any) -> None:
+        self._emit(logging.WARNING, message)
 
-    def warning(self, message):
-        message = self.getLogMessage("warning", message)
+    def error(self, message: Any) -> None:
+        self._emit(logging.ERROR, message)
 
-        self.__loggers[logging.WARNING].warning(message)
+    def critical(self, message: Any) -> None:
+        self._emit(logging.CRITICAL, message)
 
-    def debug(self, message):
-        message = self.getLogMessage("debug", message)
-
-        self.__loggers[logging.DEBUG].debug(message)
-
-    def critical(self, message):
-        message = self.getLogMessage("critical", message)
-
-        self.__loggers[logging.CRITICAL].critical(message)
+    def exception(self, message: Any) -> None:
+        self._emit(logging.ERROR, message, exc_info=True)
 
 
 log = TNLog()
-
-if __name__ == "__main__":
-    logger = TNLog()
-
-    logger.debug("debug")
-    logger.info("info")
-    logger.warning("warning")
-    logger.error("error")
-    logger.critical("critical")
