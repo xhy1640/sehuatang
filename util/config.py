@@ -22,7 +22,7 @@ fid_list = [key for key in fid_json]
 fid_value_list = [fid_json[key] for key in fid_json]
 page_num = get_config("page_num")
 
-proxy = get_config("proxy")
+proxy = get_config("proxy") or {}
 proxy_url = proxy.get("proxy_url")
 proxy_enable = proxy.get("proxy_enable")
 
