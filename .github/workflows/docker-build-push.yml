@@ -11,6 +11,10 @@ on:
       - 'docs/**'
   workflow_dispatch:
 
+permissions:
+  contents: read
+  packages: write
+
 env:
   IMAGE_NAME: xhy1640/sehuatang-crawler
 
@@ -22,7 +26,7 @@ jobs:
       - name: ⬇️ Checkout repository
         uses: actions/checkout@v4
 
-      - name: ⚙️ Set up QEMU (支持跨架构编译：ARM64 & AMD64)
+      - name: ⚙️ Set up QEMU (跨架构支持：ARM64 & AMD64)
         uses: docker/setup-qemu-action@v3
         with:
           platforms: all
@@ -30,23 +34,38 @@ jobs:
       - name: 🏗️ Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # 1. 登录 GitHub Packages (ghcr.io，内置 GITHUB_TOKEN，零配置免维护)
+      - name: 🔑 Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 2. 登录 Docker Hub (如果配置了 DOCKER_USERNAME 和 DOCKER_PASSWORD)
       - name: 🔑 Login to Docker Hub
+        id: dockerhub-login
+        continue-on-error: true
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME || secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD || secrets.DOCKERHUB_TOKEN }}
 
+      # 3. 生成镜像标签：同时支持 ghcr.io 和 docker.io
       - name: 🏷️ Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.IMAGE_NAME }}
+          images: |
+            ghcr.io/${{ env.IMAGE_NAME }}
+            ${{ steps.dockerhub-login.outcome == 'success' && env.IMAGE_NAME || '' }}
           tags: |
             type=raw,value=latest
             type=raw,value=v2
             type=ref,event=branch
             type=sha,format=short
 
+      # 4. 编译并推送多架构镜像
       - name: 🚀 Build and push Multi-Architecture image
         uses: docker/build-push-action@v5
         with:
